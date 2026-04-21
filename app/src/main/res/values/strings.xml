@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">bclaw</string>
+    <string name="notification_channel_name">bclaw connection</string>
+    <string name="notification_channel_description">Keeps the Codex app-server session alive.</string>
+    <string name="notification_title">bclaw</string>
+</resources>

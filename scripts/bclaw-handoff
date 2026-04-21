@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+set -eu
+
+usage() {
+  printf '%s\n' "usage: scripts/bclaw-handoff [--host <ws://host:port>] [--port <port>] [--token-file <path>] [--qr]" >&2
+  printf '%s\n' "" >&2
+  printf '%s\n' "  --host        WebSocket host (default: auto-detect Tailscale IP, fallback LAN)" >&2
+  printf '%s\n' "  --port        WebSocket port (default: 8766 for ACP bridge)" >&2
+  printf '%s\n' "  --token-file  Capability token file (default: ~/.codex/ws.token)" >&2
+  printf '%s\n' "  --qr          Display QR code in terminal (requires python3 qrcode module)" >&2
+  exit 1
+}
+
+host=""
+port="8766"
+token_file="${HOME}/.codex/ws.token"
+show_qr=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host)
+      [ "$#" -ge 2 ] || usage
+      host="$2"
+      shift 2
+      ;;
+    --port)
+      [ "$#" -ge 2 ] || usage
+      port="$2"
+      shift 2
+      ;;
+    --token-file)
+      [ "$#" -ge 2 ] || usage
+      token_file="$2"
+      shift 2
+      ;;
+    --qr)
+      show_qr=true
+      shift 1
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+# Auto-detect host if not specified
+if [ -z "$host" ]; then
+  ts_ip="$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null || true)"
+  if [ -n "$ts_ip" ]; then
+    host="ws://${ts_ip}:${port}"
+    printf 'auto-detected Tailscale IP: %s\n' "$ts_ip" >&2
+  else
+    lan_ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+    if [ -n "$lan_ip" ]; then
+      host="ws://${lan_ip}:${port}"
+      printf 'auto-detected LAN IP: %s (Tailscale not available)\n' "$lan_ip" >&2
+    else
+      printf 'cannot auto-detect IP; specify --host ws://host:port\n' >&2
+      exit 1
+    fi
+  fi
+fi
+
+[ -f "$token_file" ] || {
+  printf '%s\n' "token file not found: $token_file" >&2
+  exit 1
+}
+
+case "$host" in
+  ws://*)
+    authority="${host#ws://}"
+    ;;
+  *)
+    printf '%s\n' "--host must start with ws://host:port" >&2
+    exit 1
+    ;;
+esac
+
+token="$(tr -d '\r\n' < "$token_file")"
+[ -n "$token" ] || {
+  printf '%s\n' "token file is empty: $token_file" >&2
+  exit 1
+}
+
+url="bclaw1://${authority}?tok=${token}"
+
+printf '%s' "$url"
+if command -v pbcopy >/dev/null 2>&1; then
+  printf '%s' "$url" | pbcopy
+  printf '\n(copied to clipboard)\n' >&2
+else
+  printf '\n(pbcopy unavailable — URL printed above)\n' >&2
+fi
+
+if [ "$show_qr" = true ]; then
+  printf '\n' >&2
+  python3 -c "
+import sys
+try:
+    import qrcode, io
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(sys.stdin.read())
+    qr.make(fit=True)
+    f = io.StringIO()
+    qr.print_ascii(out=f, invert=True)
+    sys.stderr.write(f.getvalue())
+except ImportError:
+    sys.stderr.write('qrcode module not found. Install with: pip3 install qrcode\n')
+    sys.exit(1)
+" <<< "$url"
+fi

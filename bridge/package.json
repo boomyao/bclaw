@@ -1,0 +1,13 @@
+{
+  "name": "bclaw-acp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WebSocket to stdio bridge for ACP agents on macOS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "agents": {
+    "claude": {
+      "command": "npx",
+      "args": ["--yes", "@zed-industries/claude-code-acp@latest"],
+      "displayName": "Claude Code"
+    },
+    "codex": {
+      "command": "npx",
+      "args": ["--yes", "@zed-industries/codex-acp@latest"],
+      "displayName": "Codex"
+    },
+    "gemini": {
+      "command": "npx",
+      "args": ["--yes", "@google/gemini-cli@latest", "--experimental-acp"],
+      "displayName": "Gemini"
+    }
+  }
+}
