@@ -2,9 +2,9 @@ package com.bclaw.app.net
 
 import com.bclaw.app.net.acp.AcpInitializeParams
 import com.bclaw.app.net.acp.AcpInitializeResult
-import com.bclaw.app.net.codex.CodexJson
-import com.bclaw.app.net.codex.JsonRpcResponseEnvelope
 import java.io.IOException
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.serializer
@@ -47,12 +48,29 @@ class JsonRpcSession(
     }
 
     @PublishedApi
-    internal val json = CodexJson.json
+    internal val json = BclawJson
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val webSocketClient = WebSocketClient(okHttpClient)
     private val nextRequestId = AtomicLong(1)
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonElement>>()
     private var webSocket: WebSocket? = null
+
+    /**
+     * Single-consumer queue for inbound frames. OkHttp delivers onMessage callbacks in wire
+     * order, but spawning a coroutine per frame (previous behaviour) let Dispatchers.IO run
+     * them in parallel — during session/load replay (~200 updates in a burst) this produced
+     * non-deterministic interleaving and races on downstream state writes, visible to the
+     * user as a badly-ordered timeline. Funnelling through a single consumer preserves order.
+     */
+    private val inbound = Channel<String>(Channel.UNLIMITED)
+
+    init {
+        scope.launch {
+            for (text in inbound) {
+                runCatching { handleMessage(text) }
+            }
+        }
+    }
     suspend fun connect(
         url: String,
         token: String,
@@ -93,7 +111,7 @@ class JsonRpcSession(
 
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         if (!isCurrentSocket(webSocket)) return
-                        scope.launch { handleMessage(text) }
+                        inbound.trySend(text)
                     }
 
                     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -158,6 +176,7 @@ class JsonRpcSession(
 
     fun shutdown() {
         close()
+        inbound.close()
         scope.cancel()
     }
 
@@ -235,3 +254,33 @@ class JsonRpcSession(
         val emptyJsonObject = JsonObject(emptyMap())
     }
 }
+
+/**
+ * Shared kotlinx.serialization Json config for the bclaw wire layer.
+ * Carried forward from v0 (was `net/codex/CodexJson`), renamed to drop codex-brand.
+ */
+val BclawJson: Json = Json {
+    ignoreUnknownKeys = true
+    isLenient = true
+    explicitNulls = false
+    encodeDefaults = true
+}
+
+/**
+ * Envelope shape for JSON-RPC 2.0 responses. Used only inside [JsonRpcSession].
+ * Carried forward from v0's `JsonRpcResponseEnvelope`; the `JsonRpcErrorData` inner
+ * shape is the same as the spec's `error` object.
+ */
+@Serializable
+internal data class JsonRpcResponseEnvelope(
+    val id: JsonElement,
+    val result: JsonElement? = null,
+    val error: JsonRpcErrorData? = null,
+)
+
+@Serializable
+internal data class JsonRpcErrorData(
+    val code: Int,
+    val message: String,
+    val data: JsonElement? = null,
+)

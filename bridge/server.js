@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const WebSocket = require("ws");
@@ -11,6 +12,12 @@ const DEFAULT_PORT = 8766;
 const HOST = "0.0.0.0";
 const MAX_LINE_BYTES = 10 * 1024 * 1024;
 const CONFIG_PATH = path.join(__dirname, "agents.json");
+const CODEX_CONFIG_PATH = path.join(os.homedir(), ".codex", "config.toml");
+const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
+const GEMINI_PROJECTS_PATH = path.join(os.homedir(), ".gemini", "projects.json");
+const SESSIONS_LIMIT = 30;
+const CODEX_SCAN_FILE_BUDGET = 400; // most-recent rollout files to peek at per /sessions call
 
 function loadAgentsConfig() {
   let rawConfig;
@@ -46,6 +53,238 @@ function loadAgentsConfig() {
   }
 
   return parsedConfig.agents;
+}
+
+function readCodexProjects() {
+  let raw;
+  try {
+    raw = fs.readFileSync(CODEX_CONFIG_PATH, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return [];
+    }
+    console.warn(`Failed to read ${CODEX_CONFIG_PATH}: ${error.message}`);
+    return [];
+  }
+
+  const cwds = [];
+  const seen = new Set();
+  // Match `[projects."<path>"]` headers. Path is between the first `"` and the last `"` before `]`.
+  const headerRegex = /^\[projects\."([^\r\n]+?)"\]\s*$/gm;
+  let match;
+  while ((match = headerRegex.exec(raw)) !== null) {
+    const cwd = match[1];
+    if (!seen.has(cwd)) {
+      seen.add(cwd);
+      cwds.push(cwd);
+    }
+  }
+  return cwds;
+}
+
+function safeReadJsonLinePrefix(filePath, maxBytes = 64 * 1024) {
+  try {
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const read = fs.readSync(fd, buf, 0, maxBytes, 0);
+      return buf.slice(0, read).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function readClaudeProjects() {
+  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+  const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  const cwdSet = new Set();
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dirPath = path.join(CLAUDE_PROJECTS_DIR, entry.name);
+    let files;
+    try {
+      files = fs.readdirSync(dirPath).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    // Peek the most recent jsonl — cwd is written in every event, so first event wins.
+    files.sort();
+    const recent = files.slice(-3);
+    let cwd = null;
+    for (const f of recent) {
+      const prefix = safeReadJsonLinePrefix(path.join(dirPath, f));
+      const match = prefix.match(/"cwd":"([^"]+)"/);
+      if (match) {
+        cwd = match[1];
+        break;
+      }
+    }
+    if (cwd) cwdSet.add(cwd);
+  }
+  return [...cwdSet];
+}
+
+function readGeminiProjects() {
+  if (!fs.existsSync(GEMINI_PROJECTS_PATH)) return [];
+  try {
+    const raw = fs.readFileSync(GEMINI_PROJECTS_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.projects !== "object") return [];
+    return Object.keys(parsed.projects);
+  } catch (error) {
+    console.warn(`Failed to read ${GEMINI_PROJECTS_PATH}: ${error.message}`);
+    return [];
+  }
+}
+
+function readProjectsFor(agent) {
+  switch (agent) {
+    case "codex":
+      return readCodexProjects();
+    case "claude":
+    case "claude-code":
+      return readClaudeProjects();
+    case "gemini":
+      return readGeminiProjects();
+    default:
+      return [];
+  }
+}
+
+function listCodexRolloutFilesMostRecent(limit) {
+  if (!fs.existsSync(CODEX_SESSIONS_DIR)) return [];
+  const files = [];
+  function walk(dir) {
+    if (files.length >= limit * 4) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // Sort descending so most recent year/month/day is visited first.
+    entries.sort((a, b) => (a.name < b.name ? 1 : -1));
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        files.push(full);
+      }
+      if (files.length >= limit * 4) break;
+    }
+  }
+  walk(CODEX_SESSIONS_DIR);
+  // Rollout filenames embed the timestamp → string sort descending == recency descending.
+  files.sort((a, b) => (path.basename(a) < path.basename(b) ? 1 : -1));
+  return files;
+}
+
+function readCodexSessions(cwd) {
+  // First line of a codex rollout embeds the full system prompt under
+  // `payload.base_instructions.text` — commonly 15–19 KB, occasionally larger.
+  // We read 48 KB: that covers session_meta + several event lines, enough to
+  // find the first `user_message` event_msg whose `message` is the title we want.
+  // (Codex does not persist `thread_name` to the rollout file — the live
+  // ThreadList RPC has it, but that requires an active ACP session.)
+  const files = listCodexRolloutFilesMostRecent(CODEX_SCAN_FILE_BUDGET);
+  const hits = [];
+  const cwdNeedle = `"cwd":${JSON.stringify(cwd)}`;
+  for (const file of files) {
+    if (hits.length >= SESSIONS_LIMIT) break;
+    const prefix = safeReadJsonLinePrefix(file, 128 * 1024);
+    if (!prefix.startsWith('{"timestamp":"')) continue;
+    if (!prefix.includes('"type":"session_meta"')) continue;
+    if (!prefix.includes(cwdNeedle)) continue;
+    // Only skip when forked_from_id has a string value; `null` means not forked.
+    if (prefix.includes('"forked_from_id":"')) continue;
+    const idMatch = prefix.match(/"payload":\s*\{\s*"id":"([^"]+)"/);
+    if (!idMatch) continue;
+    const timestampMatch = prefix.match(/^\{"timestamp":"([^"]+)"/);
+    // First real user turn: `event_msg` payload with `type:"user_message"` and `message:"..."`.
+    // Response_items with role:user can be synthetic (AGENTS.md etc.) so we filter via event_msg.
+    const userMsgMatch = prefix.match(
+      /"type":"event_msg","payload":\{"type":"user_message","message":"((?:\\.|[^"\\])*)"/,
+    );
+    let title = null;
+    if (userMsgMatch) {
+      title = userMsgMatch[1]
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, " ")
+        .replace(/\\\\/g, "\\")
+        .slice(0, 120);
+    }
+    hits.push({
+      id: idMatch[1],
+      title,
+      lastActivityEpochMs: timestampMatch ? Date.parse(timestampMatch[1]) : null,
+    });
+  }
+  return hits;
+}
+
+function readClaudeSessions(cwd) {
+  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return [];
+  const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  const hits = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dirPath = path.join(CLAUDE_PROJECTS_DIR, entry.name);
+    let files;
+    try {
+      files = fs.readdirSync(dirPath).filter((f) => f.endsWith(".jsonl"));
+    } catch {
+      continue;
+    }
+    // Sort by filename descending (uuid so no recency signal) — fall back to mtime.
+    files.sort((a, b) => {
+      try {
+        const aM = fs.statSync(path.join(dirPath, a)).mtimeMs;
+        const bM = fs.statSync(path.join(dirPath, b)).mtimeMs;
+        return bM - aM;
+      } catch {
+        return 0;
+      }
+    });
+    for (const file of files) {
+      if (hits.length >= SESSIONS_LIMIT) break;
+      const full = path.join(dirPath, file);
+      const prefix = safeReadJsonLinePrefix(full, 16 * 1024);
+      const cwdMatch = prefix.match(/"cwd":"([^"]+)"/);
+      if (!cwdMatch || cwdMatch[1] !== cwd) continue;
+      const id = file.replace(/\.jsonl$/, "");
+      // Pick first "content" field as preview — queue-operation enqueue usually carries the first user msg.
+      const previewMatch = prefix.match(/"content":"((?:\\"|[^"])*?)"/);
+      let preview = null;
+      if (previewMatch) {
+        preview = previewMatch[1].replace(/\\"/g, '"').replace(/\\n/g, " ").slice(0, 120);
+      }
+      let lastActivityEpochMs = null;
+      try {
+        lastActivityEpochMs = fs.statSync(full).mtimeMs;
+      } catch {}
+      hits.push({ id, title: preview, lastActivityEpochMs });
+    }
+    if (hits.length >= SESSIONS_LIMIT) break;
+  }
+  return hits;
+}
+
+function readSessionsFor(agent, cwd) {
+  if (!cwd) return [];
+  switch (agent) {
+    case "codex":
+      return readCodexSessions(cwd);
+    case "claude":
+    case "claude-code":
+      return readClaudeSessions(cwd);
+    case "gemini":
+      return []; // no discoverable session store yet
+    default:
+      return [];
+  }
 }
 
 function parseAgentName(requestUrl) {
@@ -158,6 +397,29 @@ const server = http.createServer((request, response) => {
       "access-control-allow-origin": "*",
     });
     response.end(JSON.stringify({ agents: agentList }));
+    return;
+  }
+
+  if (url.pathname === "/projects") {
+    const agent = url.searchParams.get("agent") || "codex";
+    const projects = readProjectsFor(agent).map((cwd) => ({ cwd }));
+    response.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+    });
+    response.end(JSON.stringify({ agent, projects }));
+    return;
+  }
+
+  if (url.pathname === "/sessions") {
+    const agent = url.searchParams.get("agent") || "";
+    const cwd = url.searchParams.get("cwd") || "";
+    const sessions = readSessionsFor(agent, cwd);
+    response.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+    });
+    response.end(JSON.stringify({ agent, cwd, sessions }));
     return;
   }
 

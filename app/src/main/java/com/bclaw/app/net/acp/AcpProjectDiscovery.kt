@@ -1,5 +1,6 @@
 package com.bclaw.app.net.acp
 
+import com.bclaw.app.domain.v2.CwdPath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -7,34 +8,28 @@ import kotlinx.serialization.json.Json
 import okhttp3.Request
 
 @Serializable
-data class BridgeAgentInfo(
-    val name: String,
-    val displayName: String = name,
-    val command: String = "",
-)
+data class BridgeProjectInfo(val cwd: String)
 
 @Serializable
-data class AcpAgentsResponse(
-    val agents: List<BridgeAgentInfo> = emptyList(),
+data class AcpProjectsResponse(
+    val projects: List<BridgeProjectInfo> = emptyList(),
 )
 
 /**
- * Discovers available ACP agents from the bridge's REST endpoint.
- * Bridge URL is `ws://host:port`, we convert to `http://host:port/agents`.
+ * Discovers projects (cwd folders from `~/.codex/config.toml`) from the bridge's REST endpoint.
+ * Bridge URL is `ws://host:port`, converted to `http://host:port/projects`.
  */
-object AcpAgentDiscovery {
+object AcpProjectDiscovery {
 
-    // Shared client routes through an interceptor that flips BridgeReachability on
-    // success / IOException — see BridgeReachability for the rationale.
     private val client = BridgeReachability.client
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun fetchAgents(bridgeWsUrl: String): List<BridgeAgentInfo> {
+    suspend fun fetchProjects(bridgeWsUrl: String, agentId: String): List<CwdPath> {
         val httpUrl = bridgeWsUrl
             .replace("ws://", "http://")
             .replace("wss://", "https://")
-            .trimEnd('/') + "/agents"
+            .trimEnd('/') + "/projects?agent=" + java.net.URLEncoder.encode(agentId, "UTF-8")
 
         return withContext(Dispatchers.IO) {
             try {
@@ -42,7 +37,9 @@ object AcpAgentDiscovery {
                 val response = client.newCall(request).execute()
                 if (!response.isSuccessful) return@withContext emptyList()
                 val body = response.body?.string() ?: return@withContext emptyList()
-                json.decodeFromString(AcpAgentsResponse.serializer(), body).agents
+                json.decodeFromString(AcpProjectsResponse.serializer(), body)
+                    .projects
+                    .map { CwdPath(it.cwd) }
             } catch (_: Exception) {
                 emptyList()
             }
