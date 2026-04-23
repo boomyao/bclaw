@@ -6,9 +6,10 @@
       "displayName": "Claude Code"
     },
     "codex": {
-      "command": "npx",
-      "args": ["--yes", "@zed-industries/codex-acp@latest"],
-      "displayName": "Codex"
+      "command": "codex",
+      "args": ["app-server", "--listen", "stdio://"],
+      "displayName": "Codex",
+      "appServerAdapter": true
     },
     "gemini": {
       "command": "npx",

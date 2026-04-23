@@ -204,7 +204,11 @@ internal fun buildTimelineRows(items: List<TimelineItem>): List<TimelineRow> {
 }
 
 private fun TimelineItem.isBody(): Boolean =
-    this is TimelineItem.UserMessage || this is TimelineItem.AgentMessage
+    this is TimelineItem.UserMessage ||
+        this is TimelineItem.AgentMessage ||
+        // AgentImages renders a full-width image card — folding it into a collapsed tool
+        // group would hide the image, defeating the whole point of `view_image`.
+        this is TimelineItem.AgentImages
 
 private fun TimelineItem.isFinalized(): Boolean = when (this) {
     is TimelineItem.UserMessage -> !streaming
@@ -214,5 +218,7 @@ private fun TimelineItem.isFinalized(): Boolean = when (this) {
     is TimelineItem.FileChange ->
         status == ToolStatus.Completed || status == ToolStatus.Failed || status == ToolStatus.Cancelled
     is TimelineItem.Reasoning -> !streaming
+    is TimelineItem.AgentImages ->
+        status == ToolStatus.Completed || status == ToolStatus.Failed || status == ToolStatus.Cancelled
     is TimelineItem.Unsupported -> true
 }

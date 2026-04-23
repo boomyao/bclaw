@@ -37,6 +37,10 @@ fun SidecarStubSheet(
     visible: Boolean,
     sidecar: Sidecar?,
     onDismissRequest: () -> Unit,
+    imageAttachmentsSupported: Boolean = false,
+    macFilesSupported: Boolean = false,
+    onPickPhoneImages: () -> Unit = {},
+    onBrowseMacFiles: () -> Unit = {},
 ) {
     if (sidecar == null) {
         BclawBottomSheet(visible = false, onDismissRequest = onDismissRequest) {}
@@ -92,11 +96,34 @@ fun SidecarStubSheet(
                     body = "floats a scrcpy-style gui preview over chat, half screen. depends on v2.1 WebRTC bridge work — not a phone-side block.",
                     meta = "roadmap · v2.1 · SPEC_V2 §10",
                 )
-                Sidecar.Files -> StubCard(
-                    heading = "repo file picker",
-                    body = "browse the paired device's cwd, multi-select, attach. pending bridge-side `fs/listTextFiles` + `fs/readTextFile` forwarding — live in the ACP spec, not yet wired on the mac side.",
-                    meta = "bridge work · tracking",
-                )
+                Sidecar.Files -> Column(verticalArrangement = Arrangement.spacedBy(sp.sp3)) {
+                    ActionCard(
+                        heading = "from phone",
+                        body = if (imageAttachmentsSupported) {
+                            "pick images from your gallery; they go on the next prompt"
+                        } else {
+                            "this agent doesn't accept image input (promptCapabilities.image = false)"
+                        },
+                        enabled = imageAttachmentsSupported,
+                        onClick = {
+                            onPickPhoneImages()
+                            onDismissRequest()
+                        },
+                    )
+                    ActionCard(
+                        heading = "browse mac files",
+                        body = if (macFilesSupported) {
+                            "pick a file from the paired project; up to 256 KB embeds as context for the next prompt"
+                        } else {
+                            "this agent doesn't accept embedded file context (promptCapabilities.embeddedContext = false)"
+                        },
+                        enabled = macFilesSupported,
+                        onClick = {
+                            onBrowseMacFiles()
+                            onDismissRequest()
+                        },
+                    )
+                }
             }
         }
     }
@@ -106,6 +133,50 @@ private fun Sidecar.title(): String = when (this) {
     Sidecar.Terminal -> "terminal"
     Sidecar.Remote -> "remote"
     Sidecar.Files -> "files"
+}
+
+@Composable
+private fun ActionCard(
+    heading: String,
+    body: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val colors = BclawTheme.colors
+    val type = BclawTheme.typography
+    val sp = BclawTheme.spacing
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (enabled) colors.surfaceRaised else colors.surfaceDeep)
+            .border(1.dp, colors.borderSubtle)
+            .clickable(
+                enabled = enabled,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(sp.sp4),
+        verticalArrangement = Arrangement.spacedBy(sp.sp2),
+    ) {
+        Box(
+            modifier = Modifier
+                .height(2.dp)
+                .fillMaxWidth()
+                .background(if (enabled) colors.accent else colors.borderSubtle),
+        )
+        Text(
+            text = heading,
+            style = type.h3,
+            color = if (enabled) colors.inkPrimary else colors.inkMuted,
+        )
+        Text(
+            text = body,
+            style = type.bodyLarge,
+            color = if (enabled) colors.inkSecondary else colors.inkTertiary,
+        )
+    }
 }
 
 @Composable

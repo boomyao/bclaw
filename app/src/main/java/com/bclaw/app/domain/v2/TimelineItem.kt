@@ -28,6 +28,14 @@ sealed class TimelineItem {
      * variants so the optimistic-append-then-merge-codex-echo flow works the same way (see
      * AcpTimelineReducer.appendUserChunk + freezeStreaming).
      */
+    /**
+     * [imageAttachments]: image files (phone picker or promoted mac files) that render as
+     * thumbnails. URIs point to app-private storage so they survive process restart.
+     *
+     * [fileAttachments]: mac-side text-like files (path refs only, not content). Bridge
+     * re-reads bytes at send time and we embed them in an ACP `resource` content block;
+     * we don't persist file bytes in the timeline cache.
+     */
     @Serializable
     @SerialName("user_message")
     data class UserMessage(
@@ -35,6 +43,8 @@ sealed class TimelineItem {
         override val createdAtEpochMs: Long,
         val text: String,
         val streaming: Boolean = false,
+        val imageAttachments: List<ImageAttachment> = emptyList(),
+        val fileAttachments: List<FileAttachment> = emptyList(),
     ) : TimelineItem()
 
     /**
@@ -113,7 +123,57 @@ sealed class TimelineItem {
         override val createdAtEpochMs: Long,
         val kind: String,
     ) : TimelineItem()
+
+    /**
+     * Inline image(s) the agent is showing to the user — typically via the `view_image` tool
+     * call. Images arrive as `data:image/...;base64,...` URLs in `tool_call_update.rawOutput`
+     * and are stored verbatim here; the renderer hands them straight to Coil's AsyncImage
+     * (which supports the `data:` scheme). [sourcePath] mirrors the file path the agent read,
+     * for the user's breadcrumb.
+     */
+    @Serializable
+    @SerialName("agent_images")
+    data class AgentImages(
+        override val id: String,                   // = toolCallId
+        override val createdAtEpochMs: Long,
+        val title: String,
+        val status: ToolStatus = ToolStatus.Completed,
+        val sourcePath: String? = null,
+        val imageUrls: List<String> = emptyList(),
+    ) : TimelineItem()
 }
 
 @Serializable
 enum class ToolStatus { Pending, Running, Completed, Failed, Cancelled }
+
+/**
+ * Reference to an image the user attached to a prompt. [uri] is a `file://` URI in the app's
+ * private attachments dir (copied at send time so the reference is stable across restart and
+ * after the picker's content:// URI has expired). [sizeBytes] powers the composer's cap check.
+ */
+@Serializable
+data class ImageAttachment(
+    val uri: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+)
+
+/**
+ * Reference to a file on the paired Mac that the user picked via Tools→files. We store only
+ * the path (relative to its project [cwd]) so the timeline cache stays small; the bridge
+ * re-reads the content at send time. [truncated] mirrors the bridge's response so the
+ * renderer can show "first 256 KB only" when the file was too big.
+ *
+ * [mimeType] is the best-effort MIME derived from the filename at pick time. When it starts
+ * with `image/`, the controller promotes this attachment to an [ImageAttachment] (saves
+ * bytes to app-private storage, renders as a thumbnail) and sends it as an ACP `image`
+ * content block; otherwise the bytes go over the wire as a `resource` text block.
+ */
+@Serializable
+data class FileAttachment(
+    val cwd: String,
+    val rel: String,
+    val sizeBytes: Long,
+    val truncated: Boolean = false,
+    val mimeType: String? = null,
+)

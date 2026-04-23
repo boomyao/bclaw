@@ -10,7 +10,12 @@ const { WebSocketServer } = WebSocket;
 
 const DEFAULT_PORT = 8766;
 const HOST = "0.0.0.0";
-const MAX_LINE_BYTES = 10 * 1024 * 1024;
+// 64 MB line budget: codex app-server's thread/turns/list can return a single response
+// that embeds raw base64 for every historical imageGeneration in the session, easily
+// blowing past 10 MB in a session with a handful of generated images. The Android side
+// splits those into per-image file URLs before caching so we only ingest the big blob
+// once per load.
+const MAX_LINE_BYTES = 64 * 1024 * 1024;
 const CONFIG_PATH = path.join(__dirname, "agents.json");
 const CODEX_CONFIG_PATH = path.join(os.homedir(), ".codex", "config.toml");
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
@@ -352,7 +357,7 @@ function lineBufferForwarder(onLine, sourceLabel) {
       if (newlineIndex === -1) {
         if (!discardingOversizedLine && Buffer.byteLength(buffered, "utf8") > MAX_LINE_BYTES) {
           discardingOversizedLine = true;
-          console.warn(`${sourceLabel}: dropping line larger than 10MB`);
+          console.warn(`${sourceLabel}: dropping line larger than MAX_LINE_BYTES`);
         }
         return;
       }
@@ -367,7 +372,7 @@ function lineBufferForwarder(onLine, sourceLabel) {
       }
 
       if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) {
-        console.warn(`${sourceLabel}: dropping line larger than 10MB`);
+        console.warn(`${sourceLabel}: dropping line larger than MAX_LINE_BYTES`);
         continue;
       }
 
@@ -423,9 +428,224 @@ const server = http.createServer((request, response) => {
     return;
   }
 
+  if (url.pathname === "/fs/list") {
+    handleFsList(url, response);
+    return;
+  }
+
+  if (url.pathname === "/fs/read") {
+    handleFsRead(url, response);
+    return;
+  }
+
+  if (url.pathname === "/fs/raw") {
+    handleFsRaw(url, response);
+    return;
+  }
+
   response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
   response.end("ACP bridge is running.\n");
 });
+
+// Upper bound per /fs/read. Images can be several MB (generated PNGs, pasted screenshots)
+// and truncation on the bridge side produces corrupt decodes on the phone — the client
+// requests a size via `maxBytes` so we only serve what it asks for; this is just the cap.
+const FS_MAX_READ_BYTES = 16 * 1024 * 1024;
+
+// Sandbox root — any path the client asks about (both `cwd` and the joined `rel` target)
+// must resolve inside this dir. Defaults to the user's home so the phone can browse across
+// sibling projects + parent dirs; override with BCLAW_FS_ROOT for tighter sandboxing.
+const FS_SAFE_ROOT = (() => {
+  const configured = process.env.BCLAW_FS_ROOT || require("os").homedir();
+  try { return fs.realpathSync(configured); } catch { return configured; }
+})();
+
+function resolveSandboxed(cwd, rel) {
+  if (!cwd || !path.isAbsolute(cwd)) {
+    throw Object.assign(new Error("cwd must be an absolute path"), { httpStatus: 400 });
+  }
+  let cwdReal;
+  try {
+    cwdReal = fs.realpathSync(cwd);
+  } catch (e) {
+    throw Object.assign(new Error(`cwd not found: ${cwd}`), { httpStatus: 404 });
+  }
+  if (cwdReal !== FS_SAFE_ROOT && !cwdReal.startsWith(FS_SAFE_ROOT + path.sep)) {
+    throw Object.assign(new Error("cwd outside safe root"), { httpStatus: 403 });
+  }
+  const joined = path.resolve(cwdReal, rel || ".");
+  let targetReal;
+  try {
+    targetReal = fs.realpathSync(joined);
+  } catch (e) {
+    throw Object.assign(new Error(`path not found: ${rel || "."}`), { httpStatus: 404 });
+  }
+  if (targetReal !== FS_SAFE_ROOT && !targetReal.startsWith(FS_SAFE_ROOT + path.sep)) {
+    throw Object.assign(new Error("path escape denied"), { httpStatus: 403 });
+  }
+  return { cwdReal, targetReal };
+}
+
+function sendJson(response, status, body) {
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "access-control-allow-origin": "*",
+  });
+  response.end(JSON.stringify(body));
+}
+
+function handleFsList(url, response) {
+  const cwd = url.searchParams.get("cwd") || "";
+  const rel = url.searchParams.get("rel") || ".";
+  let resolved;
+  try {
+    resolved = resolveSandboxed(cwd, rel);
+  } catch (e) {
+    return sendJson(response, e.httpStatus || 500, { error: e.message });
+  }
+  let stat;
+  try { stat = fs.statSync(resolved.targetReal); } catch (e) {
+    return sendJson(response, 500, { error: e.message });
+  }
+  if (!stat.isDirectory()) {
+    return sendJson(response, 400, { error: "not a directory" });
+  }
+  // Include the sandbox root so the Android picker knows where "up nav" clamps.
+
+  let entries;
+  try {
+    entries = fs.readdirSync(resolved.targetReal, { withFileTypes: true })
+      .map((d) => {
+        let size = null;
+        if (d.isFile()) {
+          try { size = fs.statSync(path.join(resolved.targetReal, d.name)).size; } catch {}
+        }
+        return {
+          name: d.name,
+          kind: d.isDirectory() ? "dir" : d.isFile() ? "file" : "other",
+          size,
+        };
+      })
+      .filter((e) => e.kind === "dir" || e.kind === "file")
+      .sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+  } catch (e) {
+    return sendJson(response, 500, { error: e.message });
+  }
+
+  sendJson(response, 200, {
+    cwd,
+    rel: path.relative(resolved.cwdReal, resolved.targetReal) || ".",
+    absPath: resolved.targetReal,
+    safeRoot: FS_SAFE_ROOT,
+    entries,
+  });
+}
+
+/**
+ * Stream a file as raw bytes with an image MIME type. This is the fast path for the
+ * phone's image rendering: Coil's AsyncImage fetches by URL, so the bridge just pipes
+ * the on-disk file straight to the response without the base64 + JSON round-trip that
+ * `/fs/read` incurs. The sandbox semantics are the same — targetReal must live under
+ * FS_SAFE_ROOT — but we skip the JSON envelope so 3 MB PNGs don't become 4 MB JSON
+ * payloads that need decoding twice.
+ */
+function handleFsRaw(url, response) {
+  const cwd = url.searchParams.get("cwd") || "";
+  const rel = url.searchParams.get("rel") || "";
+  if (!rel) {
+    response.writeHead(400, { "content-type": "text/plain" });
+    response.end("rel required");
+    return;
+  }
+
+  let resolved;
+  try {
+    resolved = resolveSandboxed(cwd, rel);
+  } catch (e) {
+    response.writeHead(e.httpStatus || 500, { "content-type": "text/plain" });
+    response.end(e.message);
+    return;
+  }
+
+  let stat;
+  try { stat = fs.statSync(resolved.targetReal); } catch (e) {
+    response.writeHead(500, { "content-type": "text/plain" });
+    response.end(e.message);
+    return;
+  }
+  if (!stat.isFile()) {
+    response.writeHead(400, { "content-type": "text/plain" });
+    response.end("not a file");
+    return;
+  }
+
+  const ext = path.extname(resolved.targetReal).toLowerCase();
+  const contentType = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heic",
+    ".svg": "image/svg+xml",
+  }[ext] || "application/octet-stream";
+
+  response.writeHead(200, {
+    "content-type": contentType,
+    "content-length": stat.size,
+    // content-addressed for all our use cases (UUIDs, hashes), immutable enough to
+    // let the phone cache aggressively.
+    "cache-control": "public, max-age=31536000, immutable",
+    "access-control-allow-origin": "*",
+  });
+  fs.createReadStream(resolved.targetReal).pipe(response);
+}
+
+function handleFsRead(url, response) {
+  const cwd = url.searchParams.get("cwd") || "";
+  const rel = url.searchParams.get("rel") || "";
+  if (!rel) return sendJson(response, 400, { error: "rel required" });
+  const requestedMax = Number.parseInt(url.searchParams.get("maxBytes") || "", 10);
+  const maxBytes = Number.isFinite(requestedMax) && requestedMax > 0
+    ? Math.min(requestedMax, FS_MAX_READ_BYTES)
+    : FS_MAX_READ_BYTES;
+
+  let resolved;
+  try {
+    resolved = resolveSandboxed(cwd, rel);
+  } catch (e) {
+    return sendJson(response, e.httpStatus || 500, { error: e.message });
+  }
+  let stat;
+  try { stat = fs.statSync(resolved.targetReal); } catch (e) {
+    return sendJson(response, 500, { error: e.message });
+  }
+  if (!stat.isFile()) {
+    return sendJson(response, 400, { error: "not a file" });
+  }
+
+  const fd = fs.openSync(resolved.targetReal, "r");
+  try {
+    const buf = Buffer.alloc(Math.min(stat.size, maxBytes));
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    sendJson(response, 200, {
+      cwd,
+      rel: path.relative(resolved.cwdReal, resolved.targetReal),
+      sizeBytes: stat.size,
+      truncated: stat.size > buf.length,
+      bytesRead,
+      // base64 so the client can decode without us guessing encoding.
+      data: buf.subarray(0, bytesRead).toString("base64"),
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -454,13 +674,33 @@ wss.on("connection", (ws, request, agentName) => {
     closeWebSocketIfOpen(ws, 1011, "Agent failed to start");
   });
 
+  // Optional per-agent protocol adapter. Currently only codex uses this (to sit on
+  // top of `codex app-server --listen stdio://` instead of the Zed-flavored codex-acp).
+  // The adapter translates the official app-server protocol to ACP in both directions,
+  // so the Android client keeps talking pure ACP unchanged.
+  const adapter = agentConfig.appServerAdapter
+    ? require("./codexAppServerAdapter").createAdapter()
+    : null;
+
   child.stdout.on(
     "data",
     lineBufferForwarder((line) => {
       if (ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      ws.send(line);
+      if (adapter) {
+        const outs = adapter.translateFromChild(line);
+        for (const { type, payload } of outs) {
+          if (type === "ws") ws.send(payload);
+          else if (type === "child") {
+            if (!child.stdin.destroyed && child.stdin.writable) {
+              child.stdin.write(`${payload}\n`);
+            }
+          }
+        }
+      } else {
+        ws.send(line);
+      }
     }, `${agentName} stdout`),
   );
 
@@ -495,7 +735,15 @@ wss.on("connection", (ws, request, agentName) => {
       return;
     }
 
-    child.stdin.write(`${normalized}\n`);
+    if (adapter) {
+      const outs = adapter.translateFromClient(normalized);
+      for (const { type, payload } of outs) {
+        if (type === "child") child.stdin.write(`${payload}\n`);
+        else if (type === "ws" && ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+    } else {
+      child.stdin.write(`${normalized}\n`);
+    }
   });
 
   ws.on("close", () => {

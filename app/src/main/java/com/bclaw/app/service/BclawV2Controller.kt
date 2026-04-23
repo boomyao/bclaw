@@ -2,6 +2,9 @@ package com.bclaw.app.service
 
 import com.bclaw.app.data.BclawV2UrlParser
 import com.bclaw.app.data.DeviceBookRepository
+import com.bclaw.app.data.ImageAttachmentLoader
+import com.bclaw.app.data.LoadedAttachment
+import com.bclaw.app.data.PinnedDirsRepository
 import com.bclaw.app.data.TabBookRepository
 import com.bclaw.app.data.TimelineCacheRepository
 import com.bclaw.app.domain.v2.AgentId
@@ -21,8 +24,10 @@ import com.bclaw.app.net.BclawJson
 import com.bclaw.app.net.JsonRpcSession
 import com.bclaw.app.net.acp.AcpAgentDiscovery
 import com.bclaw.app.net.acp.AcpContentBlock
+import com.bclaw.app.net.acp.AcpResourceContent
 import com.bclaw.app.net.acp.AcpProjectDiscovery
 import com.bclaw.app.net.acp.AcpSessionDiscovery
+import com.bclaw.app.net.acp.BridgeFsClient
 import com.bclaw.app.net.acp.BridgeReachability
 import com.bclaw.app.net.acp.AcpSessionLoadParams
 import com.bclaw.app.net.acp.AcpInitializeParams
@@ -84,6 +89,8 @@ class BclawV2Controller(
     private val deviceBookRepository: DeviceBookRepository,
     private val tabBookRepository: TabBookRepository,
     private val timelineCacheRepository: TimelineCacheRepository,
+    private val imageAttachmentLoader: ImageAttachmentLoader,
+    private val pinnedDirsRepository: PinnedDirsRepository,
     private val transportFactory: AcpTransportFactory = DefaultAcpTransportFactory,
     networkAvailableFlow: StateFlow<Boolean> = MutableStateFlow(true).asStateFlow(),
     parentScope: CoroutineScope? = null,
@@ -132,6 +139,32 @@ class BclawV2Controller(
      * Cleared on transport close so the next activation retries with a fresh connection.
      */
     private val autoLoadAttempted = ConcurrentHashMap.newKeySet<TabId>()
+
+    /**
+     * Per-agent set of session ids the current connection's codex process knows about.
+     * `session/load` adds to this set; transport close/failure clears it. On the next send,
+     * if a tab's session isn't in this set, we silently re-load it before dispatching —
+     * otherwise codex answers `session/prompt` with `Resource not found` (-32002) because
+     * the respawned process has no memory of the previous load.
+     */
+    private val sessionsLoadedPerAgent = ConcurrentHashMap<AgentId, MutableSet<SessionId>>()
+
+    /**
+     * Tabs whose `session/update` notifications we're currently ignoring. Used to suppress
+     * the burst that `session/load` replays during a silent reconnect-and-rehydrate — we
+     * already have the timeline in memory, another full replay would duplicate every row.
+     */
+    private val suppressTimelineUpdates = ConcurrentHashMap.newKeySet<TabId>()
+
+    /**
+     * Side buffer used by the "cache hydrate + background refresh" path: when the tab
+     * opens with a cached timeline, we hand the user the cached view instantly and run
+     * `session/load` concurrently to catch up on any messages added since last close
+     * (e.g. from codex CLI directly). Updates for a tab in this map accumulate into the
+     * buffer's rebuilt timeline instead of appending to the live `_timelines` — on
+     * success the buffer atomically replaces the cache, on failure it's discarded.
+     */
+    private val reloadBuffers = ConcurrentHashMap<TabId, List<TimelineItem>>()
 
     /** Exponential-backoff attempt counter per agent, reset on successful connect. */
     private val reconnectAttempts = ConcurrentHashMap<AgentId, Int>()
@@ -185,6 +218,35 @@ class BclawV2Controller(
     fun timelineFor(tabId: TabId): List<TimelineItem> =
         _timelines.value[tabId].orEmpty()
 
+    /** Observed list of pinned relative directory paths for the given [cwd]. */
+    fun pinnedDirsFor(cwd: String): kotlinx.coroutines.flow.Flow<List<String>> =
+        pinnedDirsRepository.observe(cwd)
+
+    /**
+     * Fetches a mac-side image via the bridge and copies the bytes into app-private storage,
+     * returning a `file://` URI the composer can stage as if it were picked from the phone
+     * gallery. Lets the picker → preview-thumbnail UX flow through the existing image
+     * attachment path instead of a separate "mac-image" pipeline.
+     *
+     * Returns null on transport failure or if the image exceeds the size cap.
+     */
+    suspend fun prepareMacImageAttachment(
+        deviceWsUrl: String,
+        cwd: String,
+        rel: String,
+        mimeType: String,
+    ): String? {
+        val fetched = BridgeFsClient.read(deviceWsUrl, cwd, rel) ?: return null
+        val bytes = runCatching { java.util.Base64.getDecoder().decode(fetched.data) }
+            .getOrNull() ?: return null
+        return imageAttachmentLoader.loadBytes(bytes, mimeType)?.persisted?.uri
+    }
+
+    /** Flip a pin on/off — UI calls this from FsBrowserSheet's ★ toggle. */
+    fun togglePinnedDir(cwd: String, rel: String) {
+        scope.launch { pinnedDirsRepository.toggle(cwd, rel) }
+    }
+
     init {
         // Auto-load: when the active tab has a persisted sessionId and we haven't loaded it
         // yet this process, fire session/load once. Covers the "relaunch into a resumed tab"
@@ -215,12 +277,14 @@ class BclawV2Controller(
                     }
                 }
 
-                // Timeline already populated (cache hydrate, real-time streaming, or a prior
-                // resumeHistoricalSession load) — don't reload or we'd duplicate.
-                if (_timelines.value[tab.id]?.isNotEmpty() == true) {
-                    autoLoadAttempted.add(tab.id)
-                    return@collect
-                }
+                // Always run autoLoadSession once per tab per process, even when the cache
+                // already hydrated the view. The session may have grown since last close
+                // (another client sent messages, codex CLI was used directly, etc); reading
+                // only from cache makes the timeline look stale. autoLoadSession handles
+                // both the cold (empty timeline) and warm (cache populated) cases — in the
+                // warm case it routes updates into reloadBuffers and swaps atomically on
+                // success, so the user never sees a flicker unless new content actually
+                // arrives.
                 if (!autoLoadAttempted.add(tab.id)) return@collect
                 scope.launch { autoLoadSession(tab) }
             }
@@ -319,7 +383,26 @@ class BclawV2Controller(
         val device = uiState.value.deviceBook.activeDevice ?: return
         val sessionId = tab.sessionId ?: return
         sessionToTab[sessionId] = tab.id
-        updateTabRuntime(tab.id) { it.copy(historyLoading = true) }
+
+        // Don't interrupt an active turn. If the user just sent a prompt and we're mid-stream,
+        // swapping the timeline from under them would destroy the live bubble. Let the next
+        // activation pick it up.
+        if (uiState.value.tabRuntimes[tab.id]?.streamingTurnInFlight == true) {
+            autoLoadAttempted.remove(tab.id)
+            return
+        }
+
+        val hasCachedTimeline = _timelines.value[tab.id]?.isNotEmpty() == true
+        if (hasCachedTimeline) {
+            // Warm path: cache already rendered. Route the replay into a side buffer so the
+            // user sees zero flicker; on success swap the buffer in as the new truth.
+            reloadBuffers[tab.id] = emptyList()
+        } else {
+            // Cold path: empty timeline → show "loading history" and let updates flow into
+            // _timelines directly (existing behavior).
+            updateTabRuntime(tab.id) { it.copy(historyLoading = true) }
+        }
+
         val loaded = runCatching {
             val connection = ensureTransport(tab.agentId, device)
             val params = BclawJson.encodeToJsonElement(
@@ -331,19 +414,40 @@ class BclawV2Controller(
             )
             connection.transport.requestRaw("session/load", params)
         }
+
         if (loaded.isSuccess) {
-            _timelines.update { current ->
-                current.mapValues { (id, list) ->
-                    if (id == tab.id) AcpTimelineReducer.freezeStreaming(list) else list
+            if (hasCachedTimeline) {
+                val fresh = reloadBuffers[tab.id].orEmpty()
+                // Only swap if the reload actually produced content. Empty response could
+                // mean a transient issue; keep the cache rather than wipe the user's view.
+                if (fresh.isNotEmpty() &&
+                    uiState.value.tabRuntimes[tab.id]?.streamingTurnInFlight != true
+                ) {
+                    _timelines.update {
+                        it + (tab.id to AcpTimelineReducer.freezeStreaming(fresh))
+                    }
+                }
+            } else {
+                _timelines.update { current ->
+                    current.mapValues { (id, list) ->
+                        if (id == tab.id) AcpTimelineReducer.freezeStreaming(list) else list
+                    }
                 }
             }
+            sessionsLoadedPerAgent
+                .getOrPut(tab.agentId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+                .add(sessionId)
         } else {
             // Leave room for a retry on the next activation (e.g. user switches away and back,
             // or relaunches the app). Phase flips to Offline via the transport delegate so the
             // crumb signals the failure.
             autoLoadAttempted.remove(tab.id)
         }
-        updateTabRuntime(tab.id) { it.copy(historyLoading = false) }
+
+        reloadBuffers.remove(tab.id)
+        if (!hasCachedTimeline) {
+            updateTabRuntime(tab.id) { it.copy(historyLoading = false) }
+        }
     }
 
     // ── Intents ─────────────────────────────────────────────────────────
@@ -362,8 +466,16 @@ class BclawV2Controller(
             is BclawV2Intent.SwitchTab -> switchTab(intent.id)
             is BclawV2Intent.SelectHomeTab -> switchToHome()
             is BclawV2Intent.ForkTabToAgent -> Unit // Batch 2
-            is BclawV2Intent.SendPrompt -> sendPrompt(intent.tabId, intent.text)
+            is BclawV2Intent.SendPrompt -> sendPrompt(
+                intent.tabId,
+                intent.text,
+                intent.imageAttachmentUris,
+                intent.fileAttachments,
+            )
             is BclawV2Intent.CancelPrompt -> cancelPrompt(intent.tabId)
+            is BclawV2Intent.DismissSendError -> updateTabRuntime(intent.tabId) {
+                it.copy(lastSendError = null)
+            }
             is BclawV2Intent.ResumeHistoricalSession -> resumeHistoricalSession(intent.session)
         }
     }
@@ -636,19 +748,59 @@ class BclawV2Controller(
 
     // ── Prompt send / cancel ────────────────────────────────────────────
 
-    private fun sendPrompt(tabId: TabId, text: String) {
+    private fun sendPrompt(
+        tabId: TabId,
+        text: String,
+        imageAttachmentUris: List<String>,
+        fileAttachments: List<com.bclaw.app.domain.v2.FileAttachment>,
+    ) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty() && imageAttachmentUris.isEmpty() && fileAttachments.isEmpty()) return
         scope.launch {
             val tab = uiState.value.activeTabBook?.tabs?.firstOrNull { it.id == tabId } ?: return@launch
             val device = uiState.value.deviceBook.activeDevice ?: return@launch
 
+            updateTabRuntime(tabId) { it.copy(lastSendError = null) }
+
+            // 0a. Persist + base64-encode image attachments from the phone picker.
+            val loadedPhoneImages = imageAttachmentUris.mapNotNull { imageAttachmentLoader.load(it) }
+
+            // 0b. Fetch mac-side file content. Each result is routed by MIME:
+            //     - image/* → persisted as a LoadedAttachment (same path as phone images,
+            //       so the timeline renders a thumbnail + the wire gets an `image` block)
+            //     - text   → kept as a ResourceFile (embedded into an ACP `resource` block)
+            //     A previous bug sent images as resource blocks with binary-garbage text,
+            //     which codex rejected ("Invalid params") — hence the split.
+            val loadedMacImages = mutableListOf<LoadedAttachment>()
+            val loadedMacResources = mutableListOf<Pair<com.bclaw.app.domain.v2.FileAttachment, String>>()
+            val residualFileAttachments = mutableListOf<com.bclaw.app.domain.v2.FileAttachment>()
+            for (ref in fileAttachments) {
+                val fetched = BridgeFsClient.read(device.wsBaseUrl, ref.cwd, ref.rel) ?: continue
+                val bytes = runCatching {
+                    java.util.Base64.getDecoder().decode(fetched.data)
+                }.getOrNull() ?: continue
+                val isImage = ref.mimeType?.startsWith("image/") == true
+                if (isImage) {
+                    val saved = imageAttachmentLoader.loadBytes(bytes, ref.mimeType ?: "image/jpeg")
+                    if (saved != null) loadedMacImages += saved
+                    // If persistence failed (too big), silently skip; don't fake a text block.
+                } else {
+                    val asText = runCatching { String(bytes, Charsets.UTF_8) }.getOrDefault("")
+                    loadedMacResources += ref to asText
+                    residualFileAttachments += ref
+                }
+            }
+
             // 1. Optimistic: user message immediately (streaming=true so codex's
             //    user_message_chunk echo merges into this bubble instead of duplicating).
+            //    Mac images ride in imageAttachments alongside phone images so they render
+            //    as thumbnails; only text-like files remain in fileAttachments.
             appendToTimeline(tabId, TimelineItem.UserMessage(
                 createdAtEpochMs = System.currentTimeMillis(),
                 text = trimmed,
                 streaming = true,
+                imageAttachments = (loadedPhoneImages + loadedMacImages).map { it.persisted },
+                fileAttachments = residualFileAttachments,
             ))
 
             // 2. Connection + session lifecycle
@@ -667,15 +819,61 @@ class BclawV2Controller(
                 streamingTurnInFlight = true,
                 runningStripLabel = "thinking…",
             ) }
-            runCatching {
+            val sendResult = runCatching {
+                // Order: resource files first → images → text. Files + images give the agent
+                // context before the question. Text-like files use embedded ACP `resource`
+                // blocks (codex rejects `resource_link` — see probe findings). Images go via
+                // `image` blocks regardless of source (phone picker or mac fs).
+                val fileBlocks = loadedMacResources.map { (ref, asText) ->
+                    AcpContentBlock(
+                        type = "resource",
+                        resource = AcpResourceContent(
+                            uri = "file://${ref.cwd.trimEnd('/')}/${ref.rel}",
+                            mimeType = ref.mimeType ?: "text/plain",
+                            text = asText,
+                        ),
+                    )
+                }
+                val imageBlocks = (loadedPhoneImages + loadedMacImages).map { img ->
+                    AcpContentBlock(
+                        type = "image",
+                        mimeType = img.persisted.mimeType,
+                        data = img.base64Data,
+                    )
+                }
+                val textBlocks = if (trimmed.isNotEmpty()) {
+                    listOf(AcpContentBlock(type = "text", text = trimmed))
+                } else {
+                    emptyList()
+                }
                 val params = BclawJson.encodeToJsonElement(
                     AcpPromptParams.serializer(),
                     AcpPromptParams(
                         sessionId = sessionId.value,
-                        prompt = listOf(AcpContentBlock(type = "text", text = trimmed)),
+                        prompt = fileBlocks + imageBlocks + textBlocks,
                     ),
                 )
                 connection.transport.request<AcpPromptResult>("session/prompt", params)
+            }
+            // Surface send failures. Protocol-level "error" stopReason also counts — agent
+            // reported the turn failed (rejected params, crashed, etc). Silent failures had
+            // been leaving an eternally-streaming user bubble with no signal.
+            val sendErr = sendResult.exceptionOrNull()
+            if (sendErr != null) {
+                val full = if (sendErr is com.bclaw.app.net.JsonRpcException) {
+                    "code=${sendErr.code} msg=${sendErr.message} data=${sendErr.data}"
+                } else {
+                    "${sendErr.javaClass.simpleName}: ${sendErr.message}"
+                }
+                android.util.Log.e("BclawSend", "send failed: $full", sendErr)
+            }
+            val errMsg = when {
+                sendResult.isFailure -> sendResult.exceptionOrNull()?.message ?: "send failed"
+                sendResult.getOrNull()?.stopReason == "error" -> "agent reported error"
+                else -> null
+            }
+            if (errMsg != null) {
+                updateTabRuntime(tabId) { it.copy(lastSendError = errMsg) }
             }
 
             // 4. Freeze streaming states + clear running strip.
@@ -711,7 +909,13 @@ class BclawV2Controller(
                     AcpSessionCancelParams.serializer(),
                     AcpSessionCancelParams(sessionId = sessionId.value),
                 )
-                connection.transport.requestRaw("session/cancel", params)
+                // ACP `session/cancel` is a notification (no id, no response); codex's
+                // schema literally calls it `CancelNotification`. Sending it as a request
+                // makes the client wait forever for a response that never arrives, which
+                // was why the stop button looked like it did nothing. The in-flight
+                // session/prompt RPC will return on its own with stopReason="cancelled"
+                // once the agent finishes tearing down the turn.
+                connection.transport.notify("session/cancel", params)
             }
         }
     }
@@ -740,6 +944,7 @@ class BclawV2Controller(
                     if (!isCurrent()) return
                     transports.remove(agentId)?.transport?.shutdown()
                     autoLoadAttempted.clear()
+                    sessionsLoadedPerAgent.remove(agentId)
                     updateAgentPhase(agentId, AgentConnectionPhase.Offline)
                     scheduleReconnect(agentId)
                 }
@@ -747,6 +952,7 @@ class BclawV2Controller(
                     if (!isCurrent()) return
                     transports.remove(agentId)?.transport?.shutdown()
                     autoLoadAttempted.clear()
+                    sessionsLoadedPerAgent.remove(agentId)
                     updateAgentPhase(agentId, AgentConnectionPhase.Offline)
                     scheduleReconnect(agentId)
                 }
@@ -778,6 +984,27 @@ class BclawV2Controller(
     private suspend fun ensureSession(tab: TabState, connection: AgentConnection): SessionId {
         tab.sessionId?.let { existing ->
             sessionToTab[existing] = tab.id
+            val loadedForAgent = sessionsLoadedPerAgent.getOrPut(tab.agentId) {
+                java.util.concurrent.ConcurrentHashMap.newKeySet()
+            }
+            if (existing !in loadedForAgent) {
+                // Respawned codex doesn't know this session. Silently re-load so
+                // session/prompt doesn't come back with "Resource not found" (-32002).
+                // suppressTimelineUpdates swallows the session/update burst — the timeline
+                // is already populated, another replay would duplicate every row.
+                suppressTimelineUpdates.add(tab.id)
+                runCatching {
+                    val params = BclawJson.encodeToJsonElement(
+                        AcpSessionLoadParams.serializer(),
+                        AcpSessionLoadParams(
+                            sessionId = existing.value,
+                            cwd = tab.projectCwd.value,
+                        ),
+                    )
+                    connection.transport.requestRaw("session/load", params)
+                }.onSuccess { loadedForAgent.add(existing) }
+                suppressTimelineUpdates.remove(tab.id)
+            }
             return existing
         }
         val params = BclawJson.encodeToJsonElement(
@@ -787,6 +1014,9 @@ class BclawV2Controller(
         val result: AcpSessionNewResult = connection.transport.request("session/new", params)
         val sessionId = SessionId(result.sessionId)
         sessionToTab[sessionId] = tab.id
+        sessionsLoadedPerAgent
+            .getOrPut(tab.agentId) { java.util.concurrent.ConcurrentHashMap.newKeySet() }
+            .add(sessionId)
 
         val deviceId = uiState.value.deviceBook.activeDeviceId ?: return sessionId
         tabBookRepository.upsertTab(
@@ -802,6 +1032,10 @@ class BclawV2Controller(
     private fun handleSessionUpdate(params: JsonObject) {
         val sessionIdValue = params["sessionId"]?.jsonPrimitive?.contentOrNull ?: return
         val tabId = sessionToTab[SessionId(sessionIdValue)] ?: return
+        // Drop updates from the silent re-load burst that ensureSession kicks off when a
+        // respawned codex lost the session. Timeline is already in memory; replaying would
+        // duplicate every row.
+        if (tabId in suppressTimelineUpdates) return
         val update = params["update"]?.jsonObject ?: return
 
         // Session info update → persist session title (UX_V2 §2.3: tab label = session name).
@@ -824,7 +1058,17 @@ class BclawV2Controller(
         // session/load replay fires ~200 updates in a burst and a read-modify-write
         // on `.value` races even with serialized inbound dispatch if the reducer runs
         // on a different coroutine than the writer (belt-and-braces).
+        //
+        // If this tab is in the middle of a cache-hydrate + background refresh, updates
+        // go into the reload buffer instead of the live timeline. autoLoadSession swaps
+        // the buffer into _timelines atomically when the load completes.
         val now = System.currentTimeMillis()
+        if (reloadBuffers.containsKey(tabId)) {
+            reloadBuffers.computeIfPresent(tabId) { _, buffer ->
+                AcpTimelineReducer.reduce(buffer, update, now)
+            }
+            return
+        }
         _timelines.update { current ->
             current + (tabId to AcpTimelineReducer.reduce(current[tabId].orEmpty(), update, now))
         }
@@ -946,8 +1190,23 @@ sealed class BclawV2Intent {
 
     data class ForkTabToAgent(val fromTabId: TabId, val toAgent: AgentId) : BclawV2Intent()
 
-    data class SendPrompt(val tabId: TabId, val text: String) : BclawV2Intent()
+    data class SendPrompt(
+        val tabId: TabId,
+        val text: String,
+        /**
+         * Source URIs (content:// from the photo picker) selected by the user. The controller
+         * copies them to app-private storage + base64-encodes bytes for the ACP image blocks.
+         */
+        val imageAttachmentUris: List<String> = emptyList(),
+        /**
+         * Mac-side files the user picked via Tools→files. References only (cwd + rel); the
+         * controller re-fetches content from the bridge and embeds it as ACP `resource` blocks.
+         */
+        val fileAttachments: List<com.bclaw.app.domain.v2.FileAttachment> = emptyList(),
+    ) : BclawV2Intent()
     data class CancelPrompt(val tabId: TabId) : BclawV2Intent()
+    /** Dismiss the red "send failed" banner on a tab. */
+    data class DismissSendError(val tabId: TabId) : BclawV2Intent()
 }
 
 // ── UI state snapshot ───────────────────────────────────────────────────
@@ -1041,6 +1300,12 @@ data class TabRuntime(
      * "snap to bottom" until the final row count is known.
      */
     val historyLoading: Boolean = false,
+    /**
+     * Human-readable message from the last send failure (RPC exception or protocol-level
+     * `stopReason: "error"`). Surfaced as a dismissible banner above the composer. Cleared
+     * automatically at the start of the next send.
+     */
+    val lastSendError: String? = null,
 )
 
 // ── internal ────────────────────────────────────────────────────────────

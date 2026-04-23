@@ -136,6 +136,15 @@ data class AcpContentBlock(
     val mimeType: String? = null,
     val data: String? = null,
     val uri: String? = null,
+    /** Set when [type] == "resource"; carries the embedded file content. */
+    val resource: AcpResourceContent? = null,
+)
+
+@Serializable
+data class AcpResourceContent(
+    val uri: String,
+    val mimeType: String? = null,
+    val text: String? = null,
 )
 
 @Serializable

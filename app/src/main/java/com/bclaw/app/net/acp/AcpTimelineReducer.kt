@@ -2,6 +2,7 @@ package com.bclaw.app.net.acp
 
 import com.bclaw.app.domain.v2.TimelineItem
 import com.bclaw.app.domain.v2.ToolStatus
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -152,6 +153,23 @@ object AcpTimelineReducer {
         val kind = update["kind"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val status = mapStatus(update["status"]?.jsonPrimitive?.contentOrNull.orEmpty())
 
+        // Codex's `view_image` tool: title is literally "view_image" and the image payload
+        // rides in a later tool_call_update.rawOutput array. Emit a placeholder AgentImages
+        // row up front with the path; images populate on update.
+        if (title == "view_image") {
+            val sourcePath = update["rawInput"]?.jsonObject
+                ?.get("path")?.jsonPrimitive?.contentOrNull
+            val initialImages = extractImageUrlsFromRawOutput(update["rawOutput"])
+            return existing + TimelineItem.AgentImages(
+                id = toolCallId,
+                createdAtEpochMs = nowEpochMs,
+                title = title,
+                status = status,
+                sourcePath = sourcePath,
+                imageUrls = initialImages,
+            )
+        }
+
         val effectiveKind = kind.ifBlank { inferKindFromTitle(title) }
 
         val item = when (effectiveKind) {
@@ -192,10 +210,12 @@ object AcpTimelineReducer {
         val statusStr = update["status"]?.jsonPrimitive?.contentOrNull
         val newStatus = statusStr?.let { mapStatus(it) }
 
-        val rawOutput = update["rawOutput"]?.let { raw ->
-            // Mock uses a JSON string; real agents may use various shapes. Treat any leaf as text.
+        val rawOutputText = update["rawOutput"]?.let { raw ->
+            // String rawOutput (exec_command output). Array rawOutput is handled separately
+            // by the AgentImages branch below, so it doesn't land here as stringified JSON.
             runCatching { raw.jsonPrimitive.contentOrNull }.getOrNull()
         }
+        val rawOutputImages = extractImageUrlsFromRawOutput(update["rawOutput"])
 
         return existing.toMutableList().apply {
             when (val item = existing[idx]) {
@@ -203,18 +223,49 @@ object AcpTimelineReducer {
                     idx,
                     item.copy(
                         status = newStatus ?: item.status,
-                        outputTail = if (rawOutput != null) appendTail(item.outputTail, rawOutput) else item.outputTail,
+                        outputTail = if (rawOutputText != null) appendTail(item.outputTail, rawOutputText) else item.outputTail,
                     ),
                 )
                 is TimelineItem.FileChange -> set(
                     idx,
                     item.copy(
                         status = newStatus ?: item.status,
-                        unifiedDiff = rawOutput ?: item.unifiedDiff,
+                        unifiedDiff = rawOutputText ?: item.unifiedDiff,
                     ),
                 )
+                is TimelineItem.AgentImages -> {
+                    // imageGeneration populates savedPath only at completion; the
+                    // adapter forwards it via tool_call_update.rawInput.path so we can
+                    // fill in the renderer's fetch reference late.
+                    val updatedPath = update["rawInput"]?.jsonObject
+                        ?.get("path")?.jsonPrimitive?.contentOrNull
+                        ?.takeIf { it.isNotBlank() }
+                    set(
+                        idx,
+                        item.copy(
+                            status = newStatus ?: item.status,
+                            imageUrls = if (rawOutputImages.isNotEmpty()) item.imageUrls + rawOutputImages else item.imageUrls,
+                            sourcePath = updatedPath ?: item.sourcePath,
+                        ),
+                    )
+                }
                 else -> Unit
             }
+        }
+    }
+
+    /**
+     * Extracts `data:image/...;base64,...` URLs from codex's `rawOutput` array shape:
+     * `[{type: "input_image", image_url: "data:..."}]`. Returns empty when rawOutput is
+     * absent, a string, or doesn't contain any input_image entries.
+     */
+    private fun extractImageUrlsFromRawOutput(raw: kotlinx.serialization.json.JsonElement?): List<String> {
+        if (raw == null) return emptyList()
+        val arr = raw as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { entry ->
+            val obj = (entry as? JsonObject) ?: return@mapNotNull null
+            if (obj["type"]?.jsonPrimitive?.contentOrNull != "input_image") return@mapNotNull null
+            obj["image_url"]?.jsonPrimitive?.contentOrNull
         }
     }
 

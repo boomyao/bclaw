@@ -1,8 +1,11 @@
 package com.bclaw.app
 
 import android.app.Application
+import com.bclaw.app.data.AndroidImageAttachmentLoader
 import com.bclaw.app.data.DeviceBookRepository
+import com.bclaw.app.data.ImageAttachmentLoader
 import com.bclaw.app.data.NotificationPermissionRepository
+import com.bclaw.app.data.PinnedDirsRepository
 import com.bclaw.app.data.TabBookRepository
 import com.bclaw.app.data.TimelineCacheRepository
 import com.bclaw.app.net.NetworkMonitor
@@ -25,6 +28,10 @@ class BclawApplication : Application() {
         private set
     lateinit var timelineCacheRepository: TimelineCacheRepository
         private set
+    lateinit var imageAttachmentLoader: ImageAttachmentLoader
+        private set
+    lateinit var pinnedDirsRepository: PinnedDirsRepository
+        private set
     lateinit var notificationPermissionRepository: NotificationPermissionRepository
         private set
     lateinit var networkMonitor: NetworkMonitor
@@ -37,12 +44,16 @@ class BclawApplication : Application() {
         deviceBookRepository = DeviceBookRepository(this)
         tabBookRepository = TabBookRepository(this)
         timelineCacheRepository = TimelineCacheRepository(this)
+        imageAttachmentLoader = AndroidImageAttachmentLoader(this)
+        pinnedDirsRepository = PinnedDirsRepository(this)
         notificationPermissionRepository = NotificationPermissionRepository(this)
         networkMonitor = NetworkMonitor(this)
         controller = BclawV2Controller(
             deviceBookRepository = deviceBookRepository,
             tabBookRepository = tabBookRepository,
             timelineCacheRepository = timelineCacheRepository,
+            imageAttachmentLoader = imageAttachmentLoader,
+            pinnedDirsRepository = pinnedDirsRepository,
             networkAvailableFlow = networkMonitor.available,
         )
     }

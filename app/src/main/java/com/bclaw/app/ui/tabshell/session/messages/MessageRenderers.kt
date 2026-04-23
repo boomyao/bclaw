@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,10 +23,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.bclaw.app.domain.v2.TimelineItem
 import com.bclaw.app.domain.v2.ToolStatus
 import com.bclaw.app.ui.theme.BclawTheme
@@ -47,6 +50,7 @@ fun MessageItemRow(item: TimelineItem) {
         is TimelineItem.CommandExecution -> CommandExecutionRow(item)
         is TimelineItem.FileChange -> FileChangeRow(item)
         is TimelineItem.Reasoning -> ReasoningRow(item)
+        is TimelineItem.AgentImages -> AgentImagesRow(item)
         is TimelineItem.Unsupported -> UnsupportedRow(item)
     }
 }
@@ -59,20 +63,138 @@ private fun UserMessageRow(item: TimelineItem.UserMessage) {
     val type = BclawTheme.typography
     val sp = BclawTheme.spacing
 
+    // Codex Desktop's "paste image" UX wraps the attached file(s) + real question into
+    // a markdown preamble like "# Files mentioned by the user:\n## name: /abs/path\n...
+    // ## My request for Codex:\n<question>". When we replay such a rollout we parse it
+    // client-side so the image shows as a thumbnail and the text is just the question.
+    val parsed = remember(item.text) { parseFilesMentionedPreamble(item.text) }
+    val extractedImagePaths = parsed?.first.orEmpty()
+    val displayText = parsed?.second ?: item.text
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = sp.pageGutter),
         horizontalArrangement = Arrangement.End,
     ) {
-        Text(
-            text = item.text,
-            style = type.bodyLarge,
-            color = colors.accent,
-            textAlign = TextAlign.End,
+        Column(
             modifier = Modifier.widthIn(max = 320.dp),
-        )
+            horizontalAlignment = Alignment.End,
+        ) {
+            if (item.imageAttachments.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(sp.sp1)) {
+                    item.imageAttachments.forEach { attachment ->
+                        AsyncImage(
+                            model = attachment.uri,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(96.dp)
+                                .background(colors.surfaceDeep),
+                        )
+                    }
+                }
+                if (displayText.isNotBlank() ||
+                    item.fileAttachments.isNotEmpty() ||
+                    extractedImagePaths.isNotEmpty()
+                ) {
+                    Spacer(Modifier.height(sp.sp1))
+                }
+            }
+            if (extractedImagePaths.isNotEmpty()) {
+                val launchViewer = LocalImageViewer.current
+                Row(horizontalArrangement = Arrangement.spacedBy(sp.sp1)) {
+                    extractedImagePaths.forEach { absPath ->
+                        BridgeImage(
+                            absPath = absPath,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(96.dp)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { launchViewer(absPath) },
+                                ),
+                        )
+                    }
+                }
+                if (displayText.isNotBlank() || item.fileAttachments.isNotEmpty()) {
+                    Spacer(Modifier.height(sp.sp1))
+                }
+            }
+            if (item.fileAttachments.isNotEmpty()) {
+                Column(
+                    horizontalAlignment = Alignment.End,
+                    verticalArrangement = Arrangement.spacedBy(sp.sp1),
+                ) {
+                    item.fileAttachments.forEach { file ->
+                        Row(
+                            modifier = Modifier
+                                .background(colors.surfaceRaised)
+                                .padding(horizontal = sp.sp2, vertical = sp.sp1),
+                            horizontalArrangement = Arrangement.spacedBy(sp.sp1),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("📄", style = type.bodySmall, color = colors.inkSecondary)
+                            Text(
+                                text = file.rel,
+                                style = type.mono,
+                                color = colors.inkSecondary,
+                            )
+                        }
+                    }
+                }
+                if (displayText.isNotBlank()) Spacer(Modifier.height(sp.sp1))
+            }
+            if (displayText.isNotBlank()) {
+                Text(
+                    text = displayText,
+                    style = type.bodyLarge,
+                    color = colors.accent,
+                    textAlign = TextAlign.End,
+                )
+            }
+        }
     }
+}
+
+/**
+ * Parses the "# Files mentioned by the user:" preamble that codex Desktop emits
+ * when the user attaches a pasted image to their prompt. Returns (imageAbsPaths,
+ * cleanedQuestion) if the preamble is present, null otherwise.
+ *
+ * Only image-typed attachments are extracted into the first list — non-image
+ * entries collapse into the cleaned question unchanged. Good enough for the Desktop
+ * paste-image flow; iterate later if codex expands the format.
+ */
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp")
+
+private fun parseFilesMentionedPreamble(raw: String): Pair<List<String>, String>? {
+    val text = raw.trimStart()
+    if (!text.startsWith("# Files mentioned by the user:")) return null
+    val lines = text.lines()
+    val paths = mutableListOf<String>()
+    var questionStart = -1
+    for ((idx, line) in lines.withIndex()) {
+        val trimmed = line.trim()
+        if (trimmed.startsWith("## My request for Codex:")) {
+            questionStart = idx + 1
+            break
+        }
+        if (trimmed.startsWith("## ") && trimmed.contains(": ")) {
+            val path = trimmed.substringAfter(": ").trim()
+            val ext = path.substringAfterLast('.', "").lowercase()
+            if (path.startsWith("/") && ext in IMAGE_EXTENSIONS) paths.add(path)
+        }
+    }
+    val question = if (questionStart >= 0) {
+        lines.drop(questionStart).joinToString("\n").trim()
+    } else {
+        // No explicit question marker — collapse to empty so the preamble doesn't
+        // bleed through as text.
+        ""
+    }
+    return paths to question
 }
 
 // ── Agent message ───────────────────────────────────────────────────────
@@ -309,6 +431,79 @@ private fun ReasoningRow(item: TimelineItem.Reasoning) {
                 style = type.bodySmall,
                 color = colors.inkSecondary,
             )
+        }
+    }
+}
+
+// ── Agent images (view_image tool) ──────────────────────────────────────
+
+@Composable
+private fun AgentImagesRow(item: TimelineItem.AgentImages) {
+    val colors = BclawTheme.colors
+    val type = BclawTheme.typography
+    val sp = BclawTheme.spacing
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = sp.pageGutter),
+    ) {
+        val caption = buildString {
+            append("📷 ")
+            append(item.title)
+            if (!item.sourcePath.isNullOrBlank()) {
+                append(" · ")
+                append(item.sourcePath.substringAfterLast('/'))
+            }
+        }
+        Text(
+            text = caption,
+            style = type.monoSmall,
+            color = colors.inkTertiary,
+        )
+        when {
+            item.imageUrls.isNotEmpty() -> {
+                Spacer(Modifier.height(sp.sp2))
+                item.imageUrls.forEach { url ->
+                    coil.compose.AsyncImage(
+                        model = url,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(colors.surfaceDeep),
+                    )
+                    Spacer(Modifier.height(sp.sp2))
+                }
+            }
+            !item.sourcePath.isNullOrBlank() -> {
+                // Thumbnail mode: 240dp square in the timeline; tap opens the
+                // full-screen viewer. Bytes are bridged once + cached to app storage
+                // (see BridgeImage), so both the thumbnail and the full-size view
+                // read from the same local file.
+                Spacer(Modifier.height(sp.sp2))
+                val launchViewer = LocalImageViewer.current
+                val path = item.sourcePath
+                BridgeImage(
+                    absPath = path,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(240.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { launchViewer(path) },
+                        ),
+                )
+            }
+            else -> {
+                Spacer(Modifier.height(sp.sp1))
+                Text(
+                    text = "(loading image…)",
+                    style = type.bodySmall,
+                    color = colors.inkTertiary,
+                )
+            }
         }
     }
 }

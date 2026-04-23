@@ -21,8 +21,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -31,8 +33,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.unit.dp
+import com.bclaw.app.domain.v2.AgentDescriptor
 import com.bclaw.app.domain.v2.AgentId
+import com.bclaw.app.domain.v2.CwdPath
 import com.bclaw.app.domain.v2.TabId
 import com.bclaw.app.domain.v2.TabState
 import com.bclaw.app.service.BclawV2Intent
@@ -63,13 +70,33 @@ fun TabStrip(onHomeReclick: () -> Unit = {}) {
 
     var menuForTabId by remember { mutableStateOf<TabId?>(null) }
     val menuTab = tabs.firstOrNull { it.id == menuForTabId }
+    var pickerForCwd by remember { mutableStateOf<CwdPath?>(null) }
+
+    // Auto-scroll to center the active tab when it changes (including opening a new tab or
+    // resuming a session). Positions are captured via onGloballyPositioned as each tab lays
+    // out; viewport width comes from the strip's onSizeChanged.
+    val scrollState = rememberScrollState()
+    val tabBounds = remember { mutableStateMapOf<TabId, Pair<Int, Int>>() } // (xInRow, widthPx)
+    var viewportWidth by remember { mutableStateOf(0) }
+
+    LaunchedEffect(activeTabId, viewportWidth) {
+        if (activeTabId == null) {
+            scrollState.animateScrollTo(0)
+            return@LaunchedEffect
+        }
+        val (x, w) = tabBounds[activeTabId] ?: return@LaunchedEffect
+        val target = (x + w / 2 - viewportWidth / 2)
+            .coerceIn(0, scrollState.maxValue)
+        scrollState.animateScrollTo(target)
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(sp.tabStripHeight)
             .background(colors.surfaceBase)
-            .horizontalScroll(rememberScrollState()),
+            .onSizeChanged { viewportWidth = it.width }
+            .horizontalScroll(scrollState),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Leftmost pinned Home tab. Second tap while already on Home opens the project
@@ -92,27 +119,32 @@ fun TabStrip(onHomeReclick: () -> Unit = {}) {
                 selected = tab.id == activeTabId,
                 onClick = { controller.onIntent(BclawV2Intent.SwitchTab(tab.id)) },
                 onLongClick = { menuForTabId = tab.id },
+                modifier = Modifier.onGloballyPositioned { coords ->
+                    tabBounds[tab.id] = coords.positionInParent().x.toInt() to coords.size.width
+                },
             )
         }
 
-        // + button — Batch 2 wires it to the agent picker sheet. v2.0 cut picks a default
-        // agent + cwd off the active device so the tab strip demos end-to-end without a
-        // blocking modal. If the device has no known agents/cwds yet, the button is disabled.
+        // + button: opens a new session in the active cwd. Single agent → open directly;
+        // multiple → show picker sheet. No cwd/agents → disabled.
         val activeDevice = uiState.deviceBook.activeDevice
-        val fallbackAgent = activeDevice?.knownAgents?.firstOrNull()
-        val fallbackCwd = activeDevice?.knownProjects?.firstOrNull()
-        val plusEnabled = fallbackAgent != null && fallbackCwd != null
+        val newTabCwd = activeDevice?.effectiveProjectCwd
+        val supportedAgents = if (activeDevice != null && newTabCwd != null) {
+            activeDevice.agentsFor(newTabCwd)
+        } else emptyList()
+        val plusEnabled = newTabCwd != null && supportedAgents.isNotEmpty()
 
         PlusTab(
             enabled = plusEnabled,
             onClick = {
-                if (plusEnabled) {
+                if (!plusEnabled || newTabCwd == null) return@PlusTab
+                val single = supportedAgents.singleOrNull()
+                if (single != null) {
                     controller.onIntent(
-                        BclawV2Intent.OpenNewTab(
-                            agentId = fallbackAgent!!.id,
-                            cwd = fallbackCwd!!,
-                        ),
+                        BclawV2Intent.OpenNewTab(agentId = single.id, cwd = newTabCwd),
                     )
+                } else {
+                    pickerForCwd = newTabCwd
                 }
             },
         )
@@ -127,6 +159,19 @@ fun TabStrip(onHomeReclick: () -> Unit = {}) {
             val id = menuForTabId ?: return@TabActionsSheet
             menuForTabId = null
             controller.onIntent(BclawV2Intent.CloseTab(id))
+        },
+    )
+
+    NewTabAgentPickerSheet(
+        visibleForCwd = pickerForCwd,
+        agents = pickerForCwd?.let {
+            uiState.deviceBook.activeDevice?.agentsFor(it)
+        }.orEmpty(),
+        onDismissRequest = { pickerForCwd = null },
+        onPick = { agent ->
+            val cwd = pickerForCwd ?: return@NewTabAgentPickerSheet
+            pickerForCwd = null
+            controller.onIntent(BclawV2Intent.OpenNewTab(agentId = agent.id, cwd = cwd))
         },
     )
 }
@@ -174,6 +219,7 @@ private fun SessionTab(
     selected: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val colors = BclawTheme.colors
     val type = BclawTheme.typography
@@ -182,7 +228,7 @@ private fun SessionTab(
     val agentColor = agentColor(tab.agentId, colors)
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxHeight()
             .combinedClickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -310,6 +356,100 @@ private fun TabActionRow(label: String, danger: Boolean, onClick: () -> Unit) {
             style = type.body,
             color = if (danger) colors.roleError else colors.inkPrimary,
         )
+    }
+}
+
+// ── + new tab: pick agent ───────────────────────────────────────────────
+
+@Composable
+private fun NewTabAgentPickerSheet(
+    visibleForCwd: CwdPath?,
+    agents: List<AgentDescriptor>,
+    onDismissRequest: () -> Unit,
+    onPick: (AgentDescriptor) -> Unit,
+) {
+    val colors = BclawTheme.colors
+    val type = BclawTheme.typography
+    val sp = BclawTheme.spacing
+
+    BclawBottomSheet(
+        visible = visibleForCwd != null,
+        onDismissRequest = onDismissRequest,
+    ) {
+        if (visibleForCwd == null) return@BclawBottomSheet
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = sp.pageGutter, vertical = sp.sp5),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "start new session",
+                    style = type.h2,
+                    color = colors.inkPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "✕",
+                    style = type.h2,
+                    color = colors.inkTertiary,
+                    modifier = Modifier
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onDismissRequest,
+                        )
+                        .padding(sp.sp2),
+                )
+            }
+            Spacer(Modifier.height(sp.sp1))
+            Text(
+                text = visibleForCwd.value,
+                style = type.monoSmall,
+                color = colors.inkTertiary,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(sp.sp4))
+
+            agents.forEach { agent ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { onPick(agent) },
+                        )
+                        .padding(vertical = sp.sp3),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(sp.sp3),
+                ) {
+                    StatusDot(color = agentColor(agent.id, colors), size = 10.dp)
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = agent.id.value.lowercase(),
+                            style = type.h3,
+                            color = colors.inkPrimary,
+                        )
+                        Text(
+                            text = agent.displayName.ifBlank { "agent" },
+                            style = type.bodySmall,
+                            color = colors.inkTertiary,
+                        )
+                    }
+                    Text(
+                        text = "→ new tab",
+                        style = type.mono,
+                        color = colors.accent,
+                    )
+                }
+            }
+            Spacer(Modifier.height(sp.sp3))
+        }
     }
 }
 
