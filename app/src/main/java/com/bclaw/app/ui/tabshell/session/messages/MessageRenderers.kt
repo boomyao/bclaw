@@ -31,6 +31,10 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.bclaw.app.domain.v2.TimelineItem
 import com.bclaw.app.domain.v2.ToolStatus
+import com.bclaw.app.ui.showcase.messages.DiffLine
+import com.bclaw.app.ui.showcase.messages.ShowCommandBlock
+import com.bclaw.app.ui.showcase.messages.ShowDiffBlock
+import com.bclaw.app.ui.showcase.messages.ShowReasoning
 import com.bclaw.app.ui.theme.BclawTheme
 
 /**
@@ -229,104 +233,76 @@ private fun AgentMessageBlock(item: TimelineItem.AgentMessage) {
 
 // ── Command execution ───────────────────────────────────────────────────
 
+/**
+ * Renders an ACP command execution as the v2.1 paper-terminal card (`ShowCommandBlock`).
+ * The card packs status · cmd header · output tail in a warm-paper strip regardless of the
+ * host theme — a command block should always look like a terminal, not like paper.
+ *
+ * Output is clipped at ~maxLines; long outputs still surface in the tool-run group fold or
+ * future `LongOutputFold` integration. Running commands show a blinking cursor via
+ * `ShowCommandBlock(running=true)`. Cancelled / Failed keep the non-zero exit code visible.
+ */
 @Composable
 private fun CommandExecutionRow(item: TimelineItem.CommandExecution) {
-    val colors = BclawTheme.colors
-    val type = BclawTheme.typography
-    val sp = BclawTheme.spacing
-    // Running/pending auto-expanded so users see live tail; completed starts collapsed.
-    var expanded by remember {
-        mutableStateOf(item.status == ToolStatus.Running || item.status == ToolStatus.Pending)
+    val running = item.status == ToolStatus.Pending || item.status == ToolStatus.Running
+    val effectiveExit = when (item.status) {
+        ToolStatus.Completed -> item.exitCode ?: 0
+        ToolStatus.Cancelled -> item.exitCode ?: 130
+        ToolStatus.Failed -> item.exitCode ?: 1
+        else -> null
     }
-
-    val statusGlyph = when (item.status) {
-        ToolStatus.Pending, ToolStatus.Running -> "⟲"
-        ToolStatus.Completed -> "✓"
-        ToolStatus.Failed -> "✕"
-        ToolStatus.Cancelled -> "⏸"
+    val outputText = if (item.outputTail.isNotBlank()) {
+        item.outputTail
+    } else if (running) {
+        item.cwd?.let { "cwd: $it" } ?: "…"
+    } else {
+        "(no output)"
     }
-    val statusColor = when (item.status) {
-        ToolStatus.Completed -> colors.roleLive
-        ToolStatus.Failed -> colors.roleError
-        ToolStatus.Cancelled -> colors.roleWarn
-        else -> colors.accent
-    }
-    val trailing = buildString {
-        append(statusGlyph)
-        val duration = item.durationMs
-        val exit = item.exitCode
-        when {
-            duration != null -> append(" ${(duration / 1000).coerceAtLeast(1)}s")
-            exit != null -> append(" exit $exit")
-        }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { expanded = !expanded },
-            )
-            .padding(horizontal = sp.pageGutter),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(sp.sp2),
-        ) {
-            Text(
-                text = "▶ ${item.command.lines().firstOrNull().orEmpty()}",
-                style = type.mono,
-                color = colors.inkSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = trailing,
-                style = type.monoSmall,
-                color = statusColor,
-            )
-        }
-        if (expanded) {
-            Spacer(Modifier.height(sp.sp1))
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(colors.surfaceRaised)
-                    .drawBehind {
-                        drawRect(
-                            color = colors.accent,
-                            topLeft = Offset(0f, 0f),
-                            size = Size(2.dp.toPx(), size.height),
-                        )
-                    }
-                    .padding(horizontal = sp.insideCard, vertical = sp.sp3),
-                verticalArrangement = Arrangement.spacedBy(sp.sp1),
-            ) {
-                item.cwd?.let { cwd ->
-                    Text(text = cwd, style = type.monoSmall, color = colors.inkTertiary)
-                }
-                if (item.outputTail.isNotBlank()) {
-                    item.outputTail.lines().forEach { line ->
-                        Text(
-                            text = "└ $line".take(160),
-                            style = type.monoSmall,
-                            color = colors.inkTertiary,
-                        )
-                    }
-                }
-            }
-        }
-    }
+    ShowCommandBlock(
+        cmd = item.command.lines().firstOrNull().orEmpty(),
+        output = outputText,
+        exitCode = effectiveExit,
+        running = running,
+        maxLines = 6,
+    )
 }
 
 // ── File change ─────────────────────────────────────────────────────────
 
+/**
+ * Renders a file-change tool call:
+ *   - If the agent shipped a unified diff, parse it into per-file [DiffLine]s and use the
+ *     v2.1 `ShowDiffBlock` (tri-column gutter + marker + code with add/rem tinting).
+ *   - Otherwise, fall back to the compact `✎ N files · +X −Y` row — this matches pre-commit
+ *     tool calls where the edit is in flight and the diff body isn't known yet.
+ *
+ * Diff parsing is deliberately forgiving: a missing/ill-formed hunk header just drops us back
+ * to the compact row. Callers never see a crash on a malformed diff.
+ */
 @Composable
 private fun FileChangeRow(item: TimelineItem.FileChange) {
+    val diff = item.unifiedDiff
+    if (diff.isNullOrBlank()) {
+        CompactFileChangeRow(item)
+        return
+    }
+    val parsed = remember(item.id, diff) { parseUnifiedDiff(diff) }
+    if (parsed.isEmpty()) {
+        CompactFileChangeRow(item)
+        return
+    }
+    parsed.forEach { (path, lines) ->
+        ShowDiffBlock(
+            path = path.ifBlank { item.paths.firstOrNull().orEmpty() },
+            added = lines.count { it.t == '+' },
+            removed = lines.count { it.t == '-' },
+            lines = lines,
+        )
+    }
+}
+
+@Composable
+private fun CompactFileChangeRow(item: TimelineItem.FileChange) {
     val colors = BclawTheme.colors
     val type = BclawTheme.typography
     val sp = BclawTheme.spacing
@@ -395,43 +371,81 @@ private fun FileChangeRow(item: TimelineItem.FileChange) {
     }
 }
 
+/**
+ * Minimal unified-diff parser. Splits on `diff --git` or `--- a/…` headers, reads the first
+ * `+++` line as the path, then walks hunks (`@@ -l,c +l,c @@`) accumulating `+`/`-`/` ` lines
+ * with their new-file line numbers. Returns `[]` if the shape doesn't look like a diff —
+ * callers fall back to the compact summary row in that case.
+ */
+private fun parseUnifiedDiff(diff: String): List<Pair<String, List<DiffLine>>> {
+    if ("@@" !in diff) return emptyList()
+    val files = mutableListOf<Pair<String, MutableList<DiffLine>>>()
+    var currentPath = ""
+    var currentLines = mutableListOf<DiffLine>()
+    var newLineNo = 0
+    fun flush() {
+        if (currentPath.isNotBlank() && currentLines.isNotEmpty()) {
+            files += currentPath to currentLines
+        }
+        currentLines = mutableListOf()
+    }
+    for (raw in diff.lines()) {
+        when {
+            raw.startsWith("diff --git") || raw.startsWith("--- ") -> {
+                flush()
+                currentPath = ""
+            }
+            raw.startsWith("+++ ") -> {
+                currentPath = raw.removePrefix("+++ ").removePrefix("b/").trim()
+            }
+            raw.startsWith("@@") -> {
+                // Hunk header: `@@ -l,c +l,c @@ …`. We only need the leading `+` side.
+                val plus = raw.substringAfter("+").substringBefore(" ")
+                newLineNo = plus.substringBefore(",").toIntOrNull() ?: 0
+            }
+            raw.startsWith("+") && !raw.startsWith("+++") -> {
+                currentLines += DiffLine(n = newLineNo, t = '+', code = raw.drop(1))
+                newLineNo++
+            }
+            raw.startsWith("-") && !raw.startsWith("---") -> {
+                currentLines += DiffLine(n = newLineNo, t = '-', code = raw.drop(1))
+            }
+            raw.startsWith(" ") -> {
+                currentLines += DiffLine(n = newLineNo, t = ' ', code = raw.drop(1))
+                newLineNo++
+            }
+            // Skip "index …", "\ No newline at end of file", etc.
+        }
+    }
+    flush()
+    return files
+}
+
 // ── Reasoning ───────────────────────────────────────────────────────────
 
+/**
+ * Reasoning uses the v2.1 `ShowReasoning` gutter — `THINKING — <summary>` on a 2dp
+ * border-subtle left rail. Tap toggles the expanded body; empty summaries stay collapsed
+ * with a "thinking…" placeholder (the composable itself handles it).
+ */
 @Composable
 private fun ReasoningRow(item: TimelineItem.Reasoning) {
-    val colors = BclawTheme.colors
-    val type = BclawTheme.typography
-    val sp = BclawTheme.spacing
-    var expanded by remember { mutableStateOf(false) }
-
-    val summary = if (item.summary.isNotBlank()) item.summary else "thinking…"
-    val firstLine = summary.lines().firstOrNull().orEmpty().ifBlank { "thinking…" }
-
+    var expanded by remember(item.id) { mutableStateOf(false) }
+    val summary = item.summary.lines().firstOrNull().orEmpty().ifBlank {
+        if (item.streaming) "thinking…" else "(no summary)"
+    }.take(120)
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = sp.pageGutter)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { if (item.summary.isNotBlank()) expanded = !expanded },
-            ),
-        verticalArrangement = Arrangement.spacedBy(sp.sp1),
+        modifier = Modifier.clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = { if (item.summary.isNotBlank()) expanded = !expanded },
+        ),
     ) {
-        Text(
-            text = "💭 ${firstLine.take(96)}",
-            style = type.bodySmall.copy(fontStyle = FontStyle.Italic),
-            color = colors.inkTertiary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        ShowReasoning(
+            summary = summary,
+            expanded = expanded && item.summary.isNotBlank(),
+            body = item.summary.takeIf { expanded && it.isNotBlank() },
         )
-        if (expanded) {
-            Text(
-                text = item.summary,
-                style = type.bodySmall,
-                color = colors.inkSecondary,
-            )
-        }
     }
 }
 
@@ -449,7 +463,6 @@ private fun AgentImagesRow(item: TimelineItem.AgentImages) {
             .padding(horizontal = sp.pageGutter),
     ) {
         val caption = buildString {
-            append("📷 ")
             append(item.title)
             if (!item.sourcePath.isNullOrBlank()) {
                 append(" · ")
@@ -457,8 +470,8 @@ private fun AgentImagesRow(item: TimelineItem.AgentImages) {
             }
         }
         Text(
-            text = caption,
-            style = type.monoSmall,
+            text = caption.uppercase(),
+            style = type.meta,
             color = colors.inkTertiary,
         )
         when {

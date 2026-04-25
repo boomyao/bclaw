@@ -19,6 +19,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import com.bclaw.app.domain.v2.TabState
 import com.bclaw.app.ui.theme.BclawTheme
 
@@ -42,43 +44,77 @@ fun EmptySessionStarters(
     val sp = BclawTheme.spacing
 
     val agentName = tab.agentId.value.lowercase()
-    val project = tab.projectCwd.value.trimEnd('/').substringAfterLast('/')
-        .ifBlank { "this workspace" }
+    val cwd = tab.projectCwd.value.trimEnd('/')
 
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = sp.edgeLeft, vertical = sp.sp6),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.Start,
+            .padding(
+                start = sp.pageGutter,
+                end = sp.pageGutter,
+                top = sp.sp10,
+                bottom = sp.sp4,
+            ),
     ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = "●", style = type.meta, color = colors.accent)
+            Spacer(Modifier.padding(start = 6.dp))
+            Text(
+                text = "${agentName.uppercase()} · READY",
+                style = type.meta,
+                color = colors.accent,
+            )
+        }
+        Spacer(Modifier.height(sp.sp2))
         Text(
-            text = "say something to $agentName",
-            style = type.hero,
+            text = "what's on",
+            fontSize = 28.sp,
+            lineHeight = 30.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = (-0.8).sp,
             color = colors.inkPrimary,
-        )
-        Text(
-            text = "in $project.",
             style = type.hero,
-            color = colors.inkSecondary,
         )
-        Spacer(Modifier.height(sp.sp8))
-
         Text(
-            text = "STARTERS",
-            style = type.meta,
-            color = colors.inkTertiary,
+            text = "the table today?",
+            fontSize = 28.sp,
+            lineHeight = 30.sp,
+            fontWeight = FontWeight.Light,
+            letterSpacing = (-0.8).sp,
+            color = colors.inkPrimary,
+            style = type.hero,
         )
         Spacer(Modifier.height(sp.sp3))
-
-        Column(verticalArrangement = Arrangement.spacedBy(sp.sp2)) {
-            defaultStarters.forEach { starter ->
-                StarterChip(label = starter, onClick = { onSeedComposer(starter) })
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "you're in ",
+                style = type.body,
+                color = colors.inkSecondary,
+            )
+            Text(
+                text = cwd.ifBlank { "~" },
+                style = type.mono,
+                color = colors.inkPrimary,
+            )
+            Text(
+                text = ". starters to get going:",
+                style = type.body,
+                color = colors.inkSecondary,
+            )
         }
-
-        Spacer(Modifier.height(sp.sp6))
-
+        Spacer(Modifier.height(sp.sp5))
+        // First starter is the palette-open hint — matches the accent-first-card pattern
+        // from A.06. Remaining starters are secondary surface.
+        defaultStarters.forEachIndexed { i, (heading, sub, seed) ->
+            StarterCard(
+                heading = heading,
+                sub = sub,
+                accent = i == 0,
+                onClick = { onSeedComposer(seed) },
+            )
+            Spacer(Modifier.height(sp.sp2))
+        }
+        Spacer(Modifier.height(sp.sp5))
         Text(
             text = "tip: type `/` to browse commands · `@` to invoke a skill.",
             style = type.bodySmall,
@@ -87,49 +123,52 @@ fun EmptySessionStarters(
     }
 }
 
+/**
+ * Starters drive the composer prefill. v2.0 shipped raw `/` shortcuts; v2.1 dresses them
+ * as titled cards with a hint subtitle. The first entry carries the accent per A.06 so a
+ * glance shows what the session can do immediately. All three stay as pre-bridge static
+ * starters — SPEC_V2 still tracks git-recents / agent-commands / user-pinned as follow-ups.
+ */
 private val defaultStarters = listOf(
-    "/plan ",
-    "/review ",
-    "/explain ",
+    Triple("Tour this repo", "reads README + key files · /review .", "/review "),
+    Triple("Make a plan", "breaks the next task into steps · /plan ", "/plan "),
+    Triple("Explain a file", "walks key files · /explain <path>", "/explain "),
 )
 
 @Composable
-private fun StarterChip(label: String, onClick: () -> Unit) {
+private fun StarterCard(
+    heading: String,
+    sub: String,
+    accent: Boolean,
+    onClick: () -> Unit,
+) {
     val colors = BclawTheme.colors
     val type = BclawTheme.typography
     val sp = BclawTheme.spacing
-
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(colors.surfaceRaised)
-            .border(1.dp, colors.borderSubtle)
+            .background(if (accent) colors.accentSoft else colors.surfaceRaised)
+            .border(
+                width = if (accent) 1.5.dp else 1.dp,
+                color = if (accent) colors.accent else colors.borderSubtle,
+            )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick,
             )
-            .padding(horizontal = sp.sp3, vertical = sp.sp3),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = sp.sp4, vertical = sp.sp3),
     ) {
-        Box(
-            modifier = Modifier
-                .height(20.dp)
-                .background(colors.accent)
-                .padding(horizontal = 1.dp),
-        ) {
-            Spacer(Modifier.padding(horizontal = 1.dp))
-        }
-        Spacer(Modifier.padding(start = sp.sp2))
         Text(
-            text = label.trim(),
-            style = type.mono,
+            text = heading,
+            style = type.body.copy(fontWeight = FontWeight.Medium, fontSize = 14.sp),
             color = colors.inkPrimary,
-            modifier = Modifier.weight(1f),
         )
+        Spacer(Modifier.padding(top = 2.dp))
         Text(
-            text = "↵",
-            style = type.bodySmall,
+            text = sub,
+            style = type.monoSmall,
             color = colors.inkTertiary,
         )
     }

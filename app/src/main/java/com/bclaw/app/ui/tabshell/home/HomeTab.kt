@@ -26,7 +26,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.bclaw.app.domain.v2.AgentDescriptor
 import com.bclaw.app.domain.v2.AgentId
 import com.bclaw.app.domain.v2.CwdPath
@@ -34,6 +38,7 @@ import com.bclaw.app.domain.v2.Device
 import com.bclaw.app.domain.v2.SessionRef
 import com.bclaw.app.service.BclawV2Intent
 import com.bclaw.app.ui.LocalBclawController
+import com.bclaw.app.ui.LocalBclawNavigation
 import com.bclaw.app.ui.theme.BclawTheme
 
 /**
@@ -51,6 +56,7 @@ import com.bclaw.app.ui.theme.BclawTheme
 @Composable
 fun HomeTab(homeReclickTick: Int = 0) {
     val controller = LocalBclawController.current
+    val navigation = LocalBclawNavigation.current
     val uiState by controller.uiState.collectAsState()
     val projectSessions by controller.projectSessions.collectAsState()
     val colors = BclawTheme.colors
@@ -183,10 +189,22 @@ fun HomeTab(homeReclickTick: Int = 0) {
                     color = colors.inkTertiary,
                 )
             } else if (sessions.isEmpty()) {
-                Text(
-                    text = "no sessions here yet. codex reads from `~/.codex/sessions/…`; claude from `~/.claude/projects/…`.",
-                    style = type.bodySmall,
-                    color = colors.inkTertiary,
+                NoSessionsPanel(
+                    canStartNew = canStart,
+                    onNew = {
+                        if (canStart) {
+                            if (singleAgent != null) {
+                                controller.onIntent(
+                                    BclawV2Intent.OpenNewTab(
+                                        agentId = singleAgent.id,
+                                        cwd = activeCwd,
+                                    ),
+                                )
+                            } else {
+                                newSessionPickerVisible = true
+                            }
+                        }
+                    },
                 )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(sp.sp3)) {
@@ -200,6 +218,33 @@ fun HomeTab(homeReclickTick: Int = 0) {
                         )
                     }
                 }
+            }
+
+            Spacer(Modifier.height(sp.sp8))
+            // v2.1 design catalogue — designer entry point. Opens the full showcase book
+            // (states · message types · terminal · remote) in a fullscreen overlay.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { navigation.requestShowcaseOverlay() },
+                    )
+                    .padding(vertical = sp.sp2),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "V2.1 DESIGN CATALOGUE",
+                    style = type.meta,
+                    color = colors.inkTertiary,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "open →",
+                    style = type.bodySmall,
+                    color = colors.accent,
+                )
             }
 
         }
@@ -461,6 +506,96 @@ private fun agentAccent(agentId: AgentId): androidx.compose.ui.graphics.Color {
         else -> colors.roleAgentReserved
     }
 }
+
+/**
+ * v2.1 A.05 — dashed-plus empty-state when the active project has no sessions yet.
+ * Sits inside Home's scroll column so the surrounding device/project/SESSIONS chrome
+ * still frames it. "NEW SESSION" dispatches [BclawV2Intent.OpenNewTab] via the caller
+ * (single agent) or opens the agent picker (multi-agent) — same control flow as the
+ * `+ new` row header.
+ */
+@Composable
+private fun NoSessionsPanel(canStartNew: Boolean, onNew: () -> Unit) {
+    val colors = BclawTheme.colors
+    val type = BclawTheme.typography
+    val sp = BclawTheme.spacing
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = sp.sp6),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(90.dp)
+                .height(90.dp)
+                .drawDashedRect(colors.borderStrong),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "+",
+                fontSize = 44.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Thin,
+                color = colors.inkTertiary,
+                style = type.display,
+            )
+        }
+        Spacer(Modifier.height(sp.sp5))
+        Text(
+            text = "no sessions yet",
+            style = type.h2.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.Medium),
+            color = colors.inkPrimary,
+        )
+        Spacer(Modifier.height(sp.sp2))
+        Text(
+            text = "tap new session to start one. codex reads from ~/.codex/sessions/…, claude from ~/.claude/projects/…",
+            style = type.bodySmall,
+            color = colors.inkSecondary,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(horizontal = sp.sp4),
+        )
+        if (canStartNew) {
+            Spacer(Modifier.height(sp.sp5))
+            Row(horizontalArrangement = Arrangement.spacedBy(sp.sp2)) {
+                Box(
+                    modifier = Modifier
+                        .background(colors.inkPrimary)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onNew,
+                        )
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                ) {
+                    Text(
+                        text = "NEW SESSION",
+                        style = type.body.copy(
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                            letterSpacing = 1.5.sp,
+                            fontSize = 12.sp,
+                        ),
+                        color = colors.inkOnInverse,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Dashed rectangular border — the design uses a 1.5dp dashed stroke. Compose doesn't ship a
+ * dashed border modifier; we draw one via `drawBehind` + `Stroke.pathEffect`.
+ */
+private fun Modifier.drawDashedRect(color: androidx.compose.ui.graphics.Color): Modifier =
+    this.drawBehind {
+        drawRect(
+            color = color,
+            style = Stroke(
+                width = 1.5.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f),
+            ),
+        )
+    }
 
 private fun shortStamp(epochMs: Long): String {
     val diffMs = System.currentTimeMillis() - epochMs

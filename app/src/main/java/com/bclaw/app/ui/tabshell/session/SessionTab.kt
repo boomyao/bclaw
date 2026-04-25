@@ -17,10 +17,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
@@ -40,10 +42,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.bclaw.app.domain.v2.FileAttachment
 import com.bclaw.app.domain.v2.TabState
 import com.bclaw.app.service.BclawV2Intent
 import com.bclaw.app.ui.LocalBclawController
+import com.bclaw.app.ui.LocalBclawNavigation
+import com.bclaw.app.ui.tabshell.session.sidecar.LiveTerminalSidecar
 import com.bclaw.app.ui.tabshell.session.sidecar.Sidecar
 import com.bclaw.app.ui.tabshell.session.sidecar.SessionToolsSheet
 import com.bclaw.app.ui.tabshell.session.sidecar.SessionToolsTab
@@ -69,6 +74,7 @@ private const val MAX_PROMPT_ATTACHMENTS = 3
 @Composable
 fun SessionTab(tab: TabState) {
     val controller = LocalBclawController.current
+    val navigation = LocalBclawNavigation.current
     val uiState by controller.uiState.collectAsState()
     val timelines by controller.timelines.collectAsState()
     val colors = BclawTheme.colors
@@ -104,6 +110,10 @@ fun SessionTab(tab: TabState) {
     var toolsVisible by remember { mutableStateOf(false) }
     var toolsInitialTab by remember { mutableStateOf(SessionToolsTab.Sidecars) }
     var sidecarStub by remember { mutableStateOf<Sidecar?>(null) }
+    // Split-terminal layout flag: message list takes the top half, terminal body the bottom,
+    // composer is hidden (shell IS the input). Triggered from the fullscreen terminal's
+    // "⇅ SPLIT" action; closed by the divider's ✕.
+    var splitTerminalVisible by rememberSaveable(tab.id.value) { mutableStateOf(false) }
 
     // Attachments staged for the next prompt — owned here so both the composer chip strip
     // and the Tools→files entry write to the same list.
@@ -161,68 +171,82 @@ fun SessionTab(tab: TabState) {
                 }
             }
 
+            // Top half (or full body when split is off): timeline / empty / loading.
+            // In split mode we halve the weight; without split the body keeps its natural
+            // full-height allocation.
+            val bodyWeight = if (splitTerminalVisible) 1f else 1f
+            val bodyModifier = Modifier.weight(bodyWeight)
             when {
                 timeline.isEmpty() && historyLoading -> SessionHistoryLoading(
-                    modifier = Modifier.weight(1f),
+                    modifier = bodyModifier,
                 )
                 timeline.isEmpty() && !streaming -> EmptySessionStarters(
                     tab = tab,
                     onSeedComposer = { seed -> composerInput = seed },
-                    modifier = Modifier.weight(1f),
+                    modifier = bodyModifier,
                 )
                 else -> MessageList(
                     sessionKey = tab.id.value,
                     items = timeline,
                     listState = listState,
                     historyLoading = historyLoading,
-                    modifier = Modifier.weight(1f),
+                    modifier = bodyModifier,
                 )
             }
 
-            if (streaming) {
-                RunningStrip(label = runningLabel)
-            }
-            if (lastSendError != null) {
-                SendErrorBar(
-                    message = lastSendError,
-                    onDismiss = { controller.onIntent(BclawV2Intent.DismissSendError(tab.id)) },
+            if (splitTerminalVisible) {
+                // Divider row ~ JSX screens-terminal.jsx:72-89. 24dp strip, drag handle,
+                // resize / close affordances. Close returns to normal chat + composer layout.
+                SplitDivider(onClose = { splitTerminalVisible = false })
+                com.bclaw.app.ui.showcase.terminal.TerminalChipsContent(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
                 )
-            }
-
-            HairRule()
-
-            Composer(
-                input = composerInput,
-                onInputChange = { composerInput = it },
-                streaming = streaming,
-                connected = connected,
-                attachments = pendingAttachments,
-                fileAttachments = pendingFileAttachments,
-                onRemoveAttachment = { uri -> pendingAttachments = pendingAttachments - uri },
-                onRemoveFileAttachment = { ref ->
-                    pendingFileAttachments = pendingFileAttachments - ref
-                },
-                onSend = { text ->
-                    controller.onIntent(
-                        BclawV2Intent.SendPrompt(
-                            tabId = tab.id,
-                            text = text,
-                            imageAttachmentUris = pendingAttachments.map { it.toString() },
-                            fileAttachments = pendingFileAttachments,
-                        ),
+            } else {
+                if (streaming) {
+                    RunningStrip(label = runningLabel)
+                }
+                if (lastSendError != null) {
+                    SendErrorBar(
+                        message = lastSendError,
+                        onDismiss = { controller.onIntent(BclawV2Intent.DismissSendError(tab.id)) },
                     )
-                    composerInput = ""
-                    pendingAttachments = emptyList()
-                    pendingFileAttachments = emptyList()
-                },
-                onCancel = {
-                    controller.onIntent(BclawV2Intent.CancelPrompt(tab.id))
-                },
-                onOpenSidecars = {
-                    toolsInitialTab = SessionToolsTab.Sidecars
-                    toolsVisible = true
-                },
-            )
+                }
+
+                HairRule()
+
+                Composer(
+                    input = composerInput,
+                    onInputChange = { composerInput = it },
+                    streaming = streaming,
+                    connected = connected,
+                    attachments = pendingAttachments,
+                    fileAttachments = pendingFileAttachments,
+                    onRemoveAttachment = { uri -> pendingAttachments = pendingAttachments - uri },
+                    onRemoveFileAttachment = { ref ->
+                        pendingFileAttachments = pendingFileAttachments - ref
+                    },
+                    onSend = { text ->
+                        controller.onIntent(
+                            BclawV2Intent.SendPrompt(
+                                tabId = tab.id,
+                                text = text,
+                                imageAttachmentUris = pendingAttachments.map { it.toString() },
+                                fileAttachments = pendingFileAttachments,
+                            ),
+                        )
+                        composerInput = ""
+                        pendingAttachments = emptyList()
+                        pendingFileAttachments = emptyList()
+                    },
+                    onCancel = {
+                        controller.onIntent(BclawV2Intent.CancelPrompt(tab.id))
+                    },
+                    onOpenSidecars = {
+                        toolsInitialTab = SessionToolsTab.Sidecars
+                        toolsVisible = true
+                    },
+                )
+            }
         }
 
         SessionActionsSheet(
@@ -237,24 +261,56 @@ fun SessionTab(tab: TabState) {
             initialTab = toolsInitialTab,
             agentId = tab.agentId,
             onDismissRequest = { toolsVisible = false },
-            onSelectSidecar = { sidecarStub = it },
+            onSelectSidecar = { sidecar ->
+                if (sidecar == Sidecar.Remote) {
+                    navigation.requestRemoteOverlay(
+                        bridgeWsUrl = uiState.deviceBook.activeDevice?.wsBaseUrl,
+                        deviceName = uiState.deviceBook.activeDevice?.displayName ?: "device",
+                    )
+                    sidecarStub = null
+                } else {
+                    sidecarStub = sidecar
+                }
+            },
         )
 
-        SidecarStubSheet(
-            visible = sidecarStub != null,
-            sidecar = sidecarStub,
-            onDismissRequest = { sidecarStub = null },
-            imageAttachmentsSupported = imageAttachmentsSupported,
-            macFilesSupported = macFilesSupported,
-            onPickPhoneImages = {
-                pickImages.launch(
-                    PickVisualMediaRequest(
-                        ActivityResultContracts.PickVisualMedia.ImageOnly,
-                    ),
+        // Sidecar routing:
+        //   - Files → bottom sheet (it IS a picker, bottom sheet is right)
+        //   - Terminal → full-screen design shell until PTY adapter lands
+        //   - Remote → Sunshine-controlled remote sidecar
+        when (sidecarStub) {
+            Sidecar.Files -> SidecarStubSheet(
+                visible = true,
+                sidecar = sidecarStub,
+                onDismissRequest = { sidecarStub = null },
+                imageAttachmentsSupported = imageAttachmentsSupported,
+                macFilesSupported = macFilesSupported,
+                onPickPhoneImages = {
+                    pickImages.launch(
+                        PickVisualMediaRequest(
+                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                        ),
+                    )
+                },
+                onBrowseMacFiles = { fsBrowserVisible = true },
+            )
+            Sidecar.Terminal -> LiveTerminalSidecar(
+                onDismiss = { sidecarStub = null },
+                onRequestSplit = {
+                    sidecarStub = null
+                    splitTerminalVisible = true
+                },
+            )
+            Sidecar.Remote -> Unit
+            null -> {
+                // No sidecar — keep a dismissed stub sheet around for transition animation parity.
+                SidecarStubSheet(
+                    visible = false,
+                    sidecar = null,
+                    onDismissRequest = { sidecarStub = null },
                 )
-            },
-            onBrowseMacFiles = { fsBrowserVisible = true },
-        )
+            }
+        }
 
         FsBrowserSheet(
             visible = fsBrowserVisible,
@@ -354,4 +410,50 @@ private fun HairRule() {
             .height(1.dp)
             .background(colors.borderSubtle),
     )
+}
+
+/**
+ * Split-terminal divider — 24dp strip dividing the chat pane (above) from the terminal
+ * pane (below). Label explains the drag affordance; the ✕ on the right dismisses split
+ * and returns to the normal composer layout.
+ */
+@Composable
+private fun SplitDivider(onClose: () -> Unit) {
+    val colors = BclawTheme.colors
+    val type = BclawTheme.typography
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .background(colors.surfaceDeep)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            Modifier
+                .width(24.dp)
+                .height(2.dp)
+                .background(colors.inkTertiary),
+        )
+        Text(
+            text = "TERMINAL · DRAG TO RESIZE",
+            style = type.micro,
+            color = colors.inkTertiary,
+            letterSpacing = 1.5.sp,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = "✕",
+            style = type.monoSmall,
+            color = colors.inkTertiary,
+            modifier = Modifier
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClose,
+                )
+                .padding(4.dp),
+        )
+    }
 }

@@ -4,6 +4,7 @@
 # Claude Code local state
 .claude/settings.local.json
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Android / Gradle build outputs
 .gradle/
@@ -26,6 +27,8 @@ local.properties
 
 # Node (bridge server)
 node_modules/
+bridge/.sunshine-client/
+bridge/.macos-input-helper
 
 # macOS
 .DS_Store

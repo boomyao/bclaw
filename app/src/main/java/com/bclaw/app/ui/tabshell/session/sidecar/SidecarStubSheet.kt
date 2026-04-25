@@ -86,16 +86,10 @@ fun SidecarStubSheet(
             Spacer(Modifier.height(sp.sp3))
 
             when (sidecar) {
-                Sidecar.Terminal -> StubCard(
-                    heading = "split-mode terminal",
-                    body = "drags a divider between chat + a pty connected to the agent's shell. wiring lands in v2.1 once the bridge exposes `terminal/open` over the same ws auth.",
-                    meta = "roadmap · v2.1 · SPEC_V2 §10",
-                )
-                Sidecar.Remote -> StubCard(
-                    heading = "peek-mode remote",
-                    body = "floats a scrcpy-style gui preview over chat, half screen. depends on v2.1 WebRTC bridge work — not a phone-side block.",
-                    meta = "roadmap · v2.1 · SPEC_V2 §10",
-                )
+                // Terminal + Remote are routed to LiveTerminalSidecar / LiveRemoteSidecar in
+                // SessionTab so this sheet never actually renders their case. Keeping the
+                // branch defensive in case a stale entry-point opens the bottom sheet.
+                Sidecar.Terminal, Sidecar.Remote -> Unit
                 Sidecar.Files -> Column(verticalArrangement = Arrangement.spacedBy(sp.sp3)) {
                     ActionCard(
                         heading = "from phone",
