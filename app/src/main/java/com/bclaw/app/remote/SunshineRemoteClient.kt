@@ -22,6 +22,11 @@ private val RemoteHttpClient = OkHttpClient.Builder()
     .readTimeout(12, TimeUnit.SECONDS)
     .build()
 
+private val RemoteAiInputHttpClient = RemoteHttpClient.newBuilder()
+    .readTimeout(70, TimeUnit.SECONDS)
+    .callTimeout(75, TimeUnit.SECONDS)
+    .build()
+
 data class SunshineStatus(
     val installed: Boolean,
     val appPath: String?,
@@ -285,7 +290,7 @@ suspend fun generateRemoteAiInputText(
         .url("$base/remote/input/ai/text")
         .post(body)
         .build()
-    RemoteHttpClient.newCall(request).execute().use { response ->
+    RemoteAiInputHttpClient.newCall(request).execute().use { response ->
         val raw = response.body?.string().orEmpty()
         if (!response.isSuccessful) {
             throw IOException(raw.ifBlank { "HTTP ${response.code}" })
@@ -758,6 +763,15 @@ private fun parseSunshineStatus(json: JSONObject): SunshineStatus {
     val stream = json.optJSONObject("stream")
     val display = json.optJSONObject("display")
     val wake = json.optJSONObject("wake")
+    val displays = parseSunshineDisplays(display)
+    val reportedSelectedDisplayId = display?.optString("selectedId")?.takeIf { it.isNotBlank() }
+        ?: stream?.optString("displayId")?.takeIf { it.isNotBlank() }
+    val reportedSelectedDisplayName = display?.optString("selectedName")?.takeIf { it.isNotBlank() }
+        ?: stream?.optString("displayName")?.takeIf { it.isNotBlank() }
+    val selectedDisplay = displays.firstOrNull { it.id == reportedSelectedDisplayId && it.connected }
+        ?: displays.firstOrNull { it.id == reportedSelectedDisplayId }
+        ?: displays.firstOrNull { it.connected }
+        ?: displays.firstOrNull()
     return SunshineStatus(
         installed = installed?.optBoolean("available") ?: false,
         appPath = installed?.optString("appPath")?.takeIf { it.isNotBlank() },
@@ -774,11 +788,9 @@ private fun parseSunshineStatus(json: JSONObject): SunshineStatus {
         pairStatus = stream?.optString("pairStatus")?.takeIf { it.isNotBlank() } ?: "0",
         appVersion = stream?.optString("appVersion")?.takeIf { it.isNotBlank() },
         streamState = stream?.optString("state")?.takeIf { it.isNotBlank() },
-        selectedDisplayId = display?.optString("selectedId")?.takeIf { it.isNotBlank() }
-            ?: stream?.optString("displayId")?.takeIf { it.isNotBlank() },
-        selectedDisplayName = display?.optString("selectedName")?.takeIf { it.isNotBlank() }
-            ?: stream?.optString("displayName")?.takeIf { it.isNotBlank() },
-        displays = parseSunshineDisplays(display),
+        selectedDisplayId = selectedDisplay?.id ?: reportedSelectedDisplayId,
+        selectedDisplayName = selectedDisplay?.name ?: reportedSelectedDisplayName,
+        displays = displays,
         wake = parseSunshineWakeState(wake),
     )
 }

@@ -165,7 +165,7 @@ fun RemoteDesktopContent(
     var actionInFlight by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var error by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var autoConnectAttempted by remember(bridgeBase) { mutableStateOf(false) }
-    var displayZoomMode by remember(bridgeBase) { mutableStateOf(false) }
+    var displayZoomMode by remember(bridgeBase) { mutableStateOf(true) }
     var joystickEnabled by remember(bridgeBase) { mutableStateOf(false) }
     var dragLock by remember(bridgeBase) { mutableStateOf(false) }
     var desktopRotated by remember(bridgeBase) { mutableStateOf(false) }
@@ -189,10 +189,7 @@ fun RemoteDesktopContent(
                     selectedAppIndex = catalog.apps.firstOrNull { it.desktop }?.index
                         ?: catalog.apps.firstOrNull()?.index
                 }
-                if (selectedDisplayId == null) {
-                    selectedDisplayId = catalog.status.selectedDisplayId
-                        ?: catalog.status.displays.firstOrNull { it.connected }?.id
-                }
+                selectedDisplayId = resolveUsableDisplayId(selectedDisplayId, catalog.status)
                 if (catalog.status.wake.targets.isNotEmpty()) {
                     cachedWakeTargets = catalog.status.wake.targets
                     saveCachedWakeTargets(context, bridgeBase, cachedWakeTargets)
@@ -233,6 +230,8 @@ fun RemoteDesktopContent(
     fun startSession() {
         val base = bridgeBase ?: return
         val app = apps.firstOrNull { it.index == selectedAppIndex } ?: apps.firstOrNull()
+        val displayId = resolveUsableDisplayId(selectedDisplayId, status)
+        selectedDisplayId = displayId
         scope.launch {
             actionInFlight = "LIVE"
             error = null
@@ -241,7 +240,7 @@ fun RemoteDesktopContent(
             runCatching {
                 startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, selectedDisplayId),
+                    buildReadableSunshineStreamRequest(app, displayId),
                 )
             }
                 .onSuccess { plan -> launchPlan = plan }
@@ -275,9 +274,7 @@ fun RemoteDesktopContent(
                     selectedAppIndex = catalog.apps.firstOrNull { it.desktop }?.index
                         ?: catalog.apps.firstOrNull()?.index
                 }
-                val displayId = selectedDisplayId
-                    ?: catalog.status.selectedDisplayId
-                    ?: catalog.status.displays.firstOrNull { it.connected }?.id
+                val displayId = resolveUsableDisplayId(selectedDisplayId, catalog.status)
                 selectedDisplayId = displayId
                 if (catalog.status.wake.targets.isNotEmpty()) {
                     cachedWakeTargets = catalog.status.wake.targets
@@ -2793,4 +2790,23 @@ private fun buildReadableSunshineStreamRequest(
         fps = RemoteReadableFps,
         bitrateKbps = RemoteReadableBitrateKbps,
     )
+}
+
+private fun resolveUsableDisplayId(
+    preferredDisplayId: String?,
+    status: SunshineStatus?,
+): String? {
+    val displays = status?.displays.orEmpty()
+    fun String?.connectedDisplayId(): String? =
+        this?.takeIf { id -> displays.any { it.id == id && it.connected } }
+    fun String?.knownDisplayId(): String? =
+        this?.takeIf { id -> displays.any { it.id == id } }
+
+    return preferredDisplayId.connectedDisplayId()
+        ?: status?.selectedDisplayId.connectedDisplayId()
+        ?: displays.firstOrNull { it.connected }?.id
+        ?: preferredDisplayId.knownDisplayId()
+        ?: status?.selectedDisplayId.knownDisplayId()
+        ?: preferredDisplayId
+        ?: status?.selectedDisplayId
 }
