@@ -6,6 +6,12 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.SurfaceTexture
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Handler
+import android.os.Looper
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.Surface
@@ -148,6 +154,7 @@ fun RemoteDesktopContent(
 ) {
     val bridgeBase = remember(bridgeWsUrl) { bridgeWsUrl?.toBridgeHttpBase() }
     val context = LocalContext.current
+    val wifiConnected = rememberWifiConnected(context)
     val configuration = LocalConfiguration.current
     val imeWindowMetrics = rememberRemoteImeWindowMetrics()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -240,7 +247,7 @@ fun RemoteDesktopContent(
             runCatching {
                 startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId),
+                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
                 )
             }
                 .onSuccess { plan -> launchPlan = plan }
@@ -288,7 +295,7 @@ fun RemoteDesktopContent(
                     ?: catalog.apps.firstOrNull()
                 startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId),
+                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
                 )
             }
                 .onSuccess { plan -> launchPlan = plan }
@@ -311,7 +318,7 @@ fun RemoteDesktopContent(
                     ?: apps.firstOrNull()
                 val plan = startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId),
+                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
                 )
                 val nextCatalog = fetchSunshineCatalog(base)
                 status = nextCatalog.status
@@ -2777,19 +2784,72 @@ private const val RemoteReadableWidth = 1600
 private const val RemoteReadableHeight = 900
 private const val RemoteReadableFps = 30
 private const val RemoteReadableBitrateKbps = 14_000
+private const val RemoteWifiReadableWidth = 1920
+private const val RemoteWifiReadableHeight = 1080
+private const val RemoteWifiReadableBitrateKbps = 22_000
 
 private fun buildReadableSunshineStreamRequest(
     app: SunshineApp?,
     displayId: String?,
+    wifiConnected: Boolean,
 ): SunshineStreamRequest {
     return SunshineStreamRequest(
         appIndex = app?.index ?: 0,
         displayId = displayId,
-        width = RemoteReadableWidth,
-        height = RemoteReadableHeight,
+        width = if (wifiConnected) RemoteWifiReadableWidth else RemoteReadableWidth,
+        height = if (wifiConnected) RemoteWifiReadableHeight else RemoteReadableHeight,
         fps = RemoteReadableFps,
-        bitrateKbps = RemoteReadableBitrateKbps,
+        bitrateKbps = if (wifiConnected) RemoteWifiReadableBitrateKbps else RemoteReadableBitrateKbps,
     )
+}
+
+@Composable
+private fun rememberWifiConnected(context: Context): Boolean {
+    val appContext = context.applicationContext
+    val connectivityManager = remember(appContext) {
+        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+    var wifiConnected by remember(connectivityManager) {
+        mutableStateOf(connectivityManager.hasWifiNetwork())
+    }
+    DisposableEffect(connectivityManager) {
+        val mainHandler = Handler(Looper.getMainLooper())
+        fun update() {
+            val next = connectivityManager.hasWifiNetwork()
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                wifiConnected = next
+            } else {
+                mainHandler.post { wifiConnected = next }
+            }
+        }
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = update()
+            override fun onLost(network: Network) = update()
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = update()
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        runCatching { connectivityManager.registerNetworkCallback(request, callback) }
+        onDispose {
+            runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+        }
+    }
+    return wifiConnected
+}
+
+@Suppress("DEPRECATION")
+private fun ConnectivityManager.hasWifiNetwork(): Boolean {
+    val activeCaps = activeNetwork?.let { getNetworkCapabilities(it) }
+    if (activeCaps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) {
+        return true
+    }
+    return allNetworks.any { network ->
+        val caps = getNetworkCapabilities(network) ?: return@any false
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
 }
 
 private fun resolveUsableDisplayId(
