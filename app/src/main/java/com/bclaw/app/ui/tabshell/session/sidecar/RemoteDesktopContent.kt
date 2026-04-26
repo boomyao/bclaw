@@ -13,14 +13,11 @@ import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
 import android.view.HapticFeedbackConstants
-import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewTreeObserver
 import android.view.WindowManager
-import androidx.compose.animation.core.animateOffsetAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -43,7 +40,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.requiredSize
@@ -78,7 +74,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerInputScope
@@ -91,7 +86,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
@@ -139,7 +133,6 @@ import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
@@ -154,7 +147,6 @@ fun RemoteDesktopContent(
     val bridgeBase = remember(bridgeWsUrl) { bridgeWsUrl?.toBridgeHttpBase() }
     val context = LocalContext.current
     val wifiConnected = rememberWifiConnected(context)
-    val configuration = LocalConfiguration.current
     val imeWindowMetrics = rememberRemoteImeWindowMetrics()
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -172,7 +164,6 @@ fun RemoteDesktopContent(
     var error by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var autoConnectAttempted by remember(bridgeBase) { mutableStateOf(false) }
     var displayZoomMode by remember(bridgeBase) { mutableStateOf(true) }
-    var joystickEnabled by remember(bridgeBase) { mutableStateOf(false) }
     var dragLock by remember(bridgeBase) { mutableStateOf(false) }
     var desktopRotated by remember(bridgeBase) { mutableStateOf(false) }
     var appVisible by remember(lifecycleOwner) {
@@ -185,9 +176,6 @@ fun RemoteDesktopContent(
         mutableStateOf(loadCachedWakeTargets(context, bridgeBase))
     }
     var refreshKey by remember { mutableIntStateOf(0) }
-    val hideBottomControlsForIme =
-        configuration.orientation == Configuration.ORIENTATION_PORTRAIT && imeWindowMetrics.bottomPx > 0
-
     suspend fun refresh() {
         val base = bridgeBase ?: return
         loading = true
@@ -549,8 +537,6 @@ fun RemoteDesktopContent(
                 desktopRotated = desktopRotated,
                 imeWindowMetrics = imeWindowMetrics,
                 onToggleDesktopRotation = { desktopRotated = !desktopRotated },
-                joystickEnabled = joystickEnabled,
-                onJoystickToggle = { joystickEnabled = !joystickEnabled },
                 dragLock = dragLock,
                 onPrimaryMouseClick = {
                     activeStream?.let { stream ->
@@ -583,16 +569,6 @@ fun RemoteDesktopContent(
                     .weight(1f)
                     .fillMaxWidth(),
             )
-
-            if (!hideBottomControlsForIme) {
-                RemoteControlPanel(
-                    streamInput = activeStream,
-                    launchPlan = launchPlan,
-                    joystickEnabled = joystickEnabled,
-                    desktopRotated = desktopRotated,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
         }
     }
 }
@@ -610,8 +586,6 @@ private fun RemoteStreamSurface(
     desktopRotated: Boolean,
     imeWindowMetrics: RemoteImeWindowMetrics,
     onToggleDesktopRotation: () -> Unit,
-    joystickEnabled: Boolean,
-    onJoystickToggle: () -> Unit,
     dragLock: Boolean,
     onPrimaryMouseClick: () -> Unit,
     onDragLockChange: (Boolean) -> Unit,
@@ -934,14 +908,9 @@ private fun RemoteStreamSurface(
             }
         }
         if (showControls) {
-            val controlAlignment = if (desktopRotated && joystickEnabled && !canvasRotated) {
-                Alignment.TopEnd
-            } else {
-                Alignment.BottomEnd
-            }
             RemoteNativeOverlay(
                 modifier = Modifier
-                    .align(controlAlignment)
+                    .align(Alignment.BottomEnd)
                     .padding(12.dp)
                     .padding(bottom = imeBottomInsetDp)
                     .zIndex(4f),
@@ -972,10 +941,6 @@ private fun RemoteStreamSurface(
                         onOpenKeyboard = { showRemoteKeyboard() },
                         onToggleAi = { aiInputEnabled = !aiInputEnabled },
                     )
-                    RemoteDisplayJoystickToggle(
-                        enabled = joystickEnabled,
-                        onToggle = onJoystickToggle,
-                    )
                     RemoteDisplayRotateToggle(
                         rotated = desktopRotated,
                         onToggle = onToggleDesktopRotation,
@@ -983,46 +948,6 @@ private fun RemoteStreamSurface(
                     RemoteDisplayZoomToggle(
                         zoomMode = zoomMode,
                         onToggle = { onZoomModeChange(!zoomMode) },
-                    )
-                }
-            }
-            if (desktopRotated && joystickEnabled) {
-                val joystickAlignment = if (canvasRotated) Alignment.TopStart else Alignment.BottomStart
-                val joystickPadding = if (canvasRotated) {
-                    Modifier.padding(start = 18.dp, top = 18.dp)
-                } else {
-                    Modifier.padding(start = 18.dp, bottom = 18.dp + imeBottomInsetDp)
-                }
-                val clusterAlignment = if (canvasRotated) Alignment.BottomStart else Alignment.BottomEnd
-                val clusterPadding = if (canvasRotated) {
-                    Modifier.padding(start = 18.dp, bottom = 18.dp)
-                } else {
-                    Modifier.padding(end = 18.dp, bottom = 18.dp + imeBottomInsetDp)
-                }
-                RemoteNativeOverlay(
-                    modifier = Modifier
-                        .align(joystickAlignment)
-                        .then(joystickPadding)
-                        .zIndex(3f),
-                ) {
-                    RemoteJoystickSurface(
-                        streamInput = streamInput,
-                        launchPlan = launchPlan,
-                        desktopRotated = canvasRotated,
-                        modifier = Modifier.size(170.dp),
-                    )
-                }
-                RemoteNativeOverlay(
-                    modifier = Modifier
-                        .align(clusterAlignment)
-                        .then(clusterPadding)
-                        .zIndex(3f),
-                ) {
-                    RemoteAabbCluster(
-                        streamInput = streamInput,
-                        overlay = true,
-                        rotated = canvasRotated,
-                        modifier = Modifier.size(170.dp),
                     )
                 }
             }
@@ -2105,201 +2030,6 @@ private fun RemoteTopBar(
 }
 
 /**
- * Below-canvas controller. Joystick on the left, AABB diamond on the right. Hidden
- * entirely when the joystick is toggled off, and also hidden when the canvas is rotated
- * to landscape — that mode hands controls off to floating overlays drawn on top of the
- * stream surface.
- */
-@Composable
-private fun RemoteControlPanel(
-    streamInput: SunshineVideoStream?,
-    launchPlan: SunshineLaunchPlan?,
-    joystickEnabled: Boolean,
-    desktopRotated: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    if (!joystickEnabled || desktopRotated) return
-    Row(
-        modifier = modifier
-            .background(Color(0xFF0A0A0A))
-            .border(1.dp, Color(0xFF26261C))
-            .padding(horizontal = 10.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RemoteJoystickSurface(
-            streamInput = streamInput,
-            launchPlan = launchPlan,
-            desktopRotated = desktopRotated,
-            modifier = Modifier
-                .size(140.dp)
-                .background(Color(0xFF0F0F0B))
-                .border(1.dp, Color(0xFF26261C)),
-        )
-        RemoteAabbCluster(
-            streamInput = streamInput,
-            overlay = false,
-            rotated = false,
-            modifier = Modifier.size(140.dp),
-        )
-    }
-}
-
-/**
- * 4-button game-controller diamond. Top sends Up arrow, bottom sends Down arrow, left
- * sends a left mouse click, right sends a right mouse click — all with press-and-hold
- * semantics so chording with the joystick (drag, lasso, key-repeat) works.
- *
- * `overlay` controls the larger floating size; `rotated` tracks whether the desktop
- * canvas itself is being rotated in Compose. When Android has already moved the app into
- * landscape there is no extra visual canvas rotation, so the button diamond should not
- * receive an extra graphics-layer rotation.
- */
-@Composable
-private fun RemoteAabbCluster(
-    streamInput: SunshineVideoStream?,
-    overlay: Boolean,
-    rotated: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val buttonSize = if (overlay) 54.dp else 44.dp
-    val rotation = if (rotated) Modifier.graphicsLayer { rotationZ = 90f } else Modifier
-    Box(modifier = modifier.then(rotation)) {
-        RemoteAabbButton(
-            label = "↑",
-            overlay = overlay,
-            onPress = { streamInput?.sendKeyboardKey(pressed = true, keyCode = SunshineKey.UP) },
-            onRelease = { streamInput?.sendKeyboardKey(pressed = false, keyCode = SunshineKey.UP) },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .size(buttonSize),
-        )
-        RemoteAabbButton(
-            label = "↓",
-            overlay = overlay,
-            onPress = { streamInput?.sendKeyboardKey(pressed = true, keyCode = SunshineKey.DOWN) },
-            onRelease = { streamInput?.sendKeyboardKey(pressed = false, keyCode = SunshineKey.DOWN) },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .size(buttonSize),
-        )
-        RemoteAabbButton(
-            label = "L",
-            overlay = overlay,
-            onPress = { streamInput?.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT) },
-            onRelease = { streamInput?.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT) },
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .size(buttonSize),
-        )
-        RemoteAabbButton(
-            label = "R",
-            overlay = overlay,
-            onPress = { streamInput?.sendMouseButton(pressed = true, button = SunshineMouseButton.RIGHT) },
-            onRelease = { streamInput?.sendMouseButton(pressed = false, button = SunshineMouseButton.RIGHT) },
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .size(buttonSize),
-        )
-    }
-}
-
-/**
- * Circular press-and-hold button used by the AABB cluster. `onPress` fires on touch-down,
- * `onRelease` on lift or cancel — so a held arrow key auto-repeats on the host and a held
- * mouse button stays pressed for drag. All four diamond buttons share one style — no
- * accent on the left-click button — so the cluster reads as a single control surface.
- */
-@Composable
-private fun RemoteAabbButton(
-    label: String,
-    onPress: () -> Unit,
-    onRelease: () -> Unit,
-    overlay: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    val type = BclawTheme.typography
-    val view = LocalView.current
-    var pressed by remember { mutableStateOf(false) }
-    val bg = if (overlay) {
-        if (pressed) Color.White.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.22f)
-    } else {
-        if (pressed) Color(0xFF24241B) else Color(0xFF141410)
-    }
-    val fg = if (overlay) {
-        if (pressed) Color.Black else MetroCyan
-    } else {
-        Color(0xFFD8D2BE)
-    }
-    val border = if (overlay) {
-        if (pressed) MetroCyan else Color.White.copy(alpha = 0.55f)
-    } else {
-        if (pressed) MetroCyan else Color(0xFF3A3A2E)
-    }
-    Box(
-        modifier = modifier
-            .clip(CircleShape)
-            .background(bg, CircleShape)
-            .border(BorderStroke(1.dp, border), CircleShape)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        pressed = true
-                        onPress()
-                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                        tryAwaitRelease()
-                        pressed = false
-                        onRelease()
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            style = type.h3,
-            color = fg,
-            maxLines = 1,
-            overflow = TextOverflow.Clip,
-        )
-    }
-}
-
-/**
- * Floating toggle on the display surface — turns the joystick pad on/off in the bottom
- * panel. Lives leftmost in the bottom-right overlay row.
- */
-@Composable
-private fun RemoteDisplayJoystickToggle(
-    enabled: Boolean,
-    onToggle: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val bg = if (enabled) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
-    val fg = if (enabled) Color.Black else Color(0xFFD8D2BE)
-    val border = if (enabled) MetroCyan else Color(0xFF26261C)
-    Box(
-        modifier = modifier
-            .requiredSize(36.dp)
-            .background(bg)
-            .border(BorderStroke(1.dp, border))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onToggle,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            painter = painterResource(id = R.drawable.ic_remote_joystick),
-            contentDescription = null,
-            tint = fg,
-            modifier = Modifier.size(20.dp),
-        )
-    }
-}
-
-/**
  * Floating toggle that holds the left mouse button down. Movement after this is on
  * becomes a drag-select on the host. Toggling off releases the button. Trackpad-mode
  * tap-clicks are suppressed while this is on so a stray tap doesn't break the lock.
@@ -2467,150 +2197,6 @@ private fun RemoteDisplayZoomToggle(
     }
 }
 
-/**
- * Joystick visualization with trackpad-style mouse delta. Finger motion is converted to
- * direct mouse-move deltas (1:1 scaled by [mouseSensitivity]) — no velocity integration,
- * no dead zone. The base circle appears at the touch-down location and stays put for the
- * gesture; the knob shows the finger's offset from that anchor, clamped so it can never
- * leave the base. On lift, the knob springs back to centre and the base disappears.
- */
-@Composable
-@OptIn(ExperimentalComposeUiApi::class)
-private fun RemoteJoystickSurface(
-    streamInput: SunshineVideoStream?,
-    launchPlan: SunshineLaunchPlan?,
-    desktopRotated: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val density = LocalDensity.current
-    val view = LocalView.current
-    var joystickSize by remember { mutableStateOf(IntSize.Zero) }
-    var lastPos by remember { mutableStateOf<Offset?>(null) }
-    var stickCenter by remember { mutableStateOf<Offset?>(null) }
-    var knobTarget by remember { mutableStateOf(Offset.Zero) }
-    val knobAnimated by animateOffsetAsState(
-        targetValue = knobTarget,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = 520f),
-        label = "joystickKnob",
-    )
-
-    val baseSizePx = with(density) { JOYSTICK_BASE_SIZE_DP.dp.toPx() }
-    val knobTravelPx = with(density) { JOYSTICK_KNOB_TRAVEL_DP.dp.toPx() }
-    val fallbackCenter = if (joystickSize.width > 0 && joystickSize.height > 0) {
-        Offset(joystickSize.width / 2f, joystickSize.height / 2f)
-    } else {
-        Offset.Zero
-    }
-    val visualCenter = stickCenter ?: fallbackCenter
-
-    Box(
-        modifier = modifier
-            .onSizeChanged { joystickSize = it }
-            .pointerInteropFilter { event ->
-                if (joystickSize.width <= 0 || joystickSize.height <= 0) return@pointerInteropFilter true
-                val plan = launchPlan
-                val stream = streamInput
-
-                fun clampCenter(point: Offset): Offset {
-                    val visualRadius = (baseSizePx / 2f).coerceAtMost(min(joystickSize.width, joystickSize.height) / 2f)
-                    val maxX = (joystickSize.width - visualRadius).coerceAtLeast(visualRadius)
-                    val maxY = (joystickSize.height - visualRadius).coerceAtLeast(visualRadius)
-                    return Offset(
-                        x = point.x.coerceIn(visualRadius, maxX),
-                        y = point.y.coerceIn(visualRadius, maxY),
-                    )
-                }
-
-                fun knobOffsetFor(point: Offset, anchor: Offset): Offset {
-                    val delta = point - anchor
-                    val distance = delta.getDistance()
-                    if (distance <= 0f || knobTravelPx <= 0f) return Offset.Zero
-                    val normalized = (distance / knobTravelPx).coerceIn(0f, 1f)
-                    return Offset(
-                        x = (delta.x / distance) * normalized,
-                        y = (delta.y / distance) * normalized,
-                    )
-                }
-
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        val anchor = clampCenter(Offset(event.x, event.y))
-                        stickCenter = anchor
-                        lastPos = Offset(event.x, event.y)
-                        knobTarget = Offset.Zero
-                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                        true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val previous = lastPos
-                        val anchor = stickCenter
-                        val current = Offset(event.x, event.y)
-                        if (previous != null && anchor != null && stream != null && plan != null) {
-                            val dx = current.x - previous.x
-                            val dy = current.y - previous.y
-
-                            val sensitivity = mouseSensitivity(plan)
-                            val remoteDelta = rotateRemoteDelta(Offset(dx, dy), desktopRotated)
-                            val mx = (remoteDelta.x * sensitivity).roundToInt()
-                            val my = (remoteDelta.y * sensitivity).roundToInt()
-                            if (mx != 0 || my != 0) stream.sendMouseMove(mx, my)
-
-                            knobTarget = knobOffsetFor(current, anchor)
-                        }
-                        lastPos = current
-                        true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        knobTarget = Offset.Zero
-                        lastPos = null
-                        stickCenter = null
-                        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        true
-                    }
-                    MotionEvent.ACTION_CANCEL -> {
-                        knobTarget = Offset.Zero
-                        lastPos = null
-                        stickCenter = null
-                        true
-                    }
-                    else -> true
-                }
-            },
-        contentAlignment = Alignment.TopStart,
-    ) {
-        Box(
-            modifier = Modifier
-                .offset {
-                    IntOffset(
-                        x = (visualCenter.x - baseSizePx / 2f).roundToInt(),
-                        y = (visualCenter.y - baseSizePx / 2f).roundToInt(),
-                    )
-                }
-                .size(JOYSTICK_BASE_SIZE_DP.dp)
-                .clip(CircleShape)
-                .background(Color(0xFF11110D))
-                .border(1.dp, Color(0xFF3A3A2E), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Box(
-                modifier = Modifier
-                    .offset {
-                        IntOffset(
-                            x = (knobAnimated.x * knobTravelPx).roundToInt(),
-                            y = (knobAnimated.y * knobTravelPx).roundToInt(),
-                        )
-                    }
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(if (streamInput == null) Color(0xFF24241B) else MetroCyan)
-                    .border(1.dp, Color(0xFF7DEBFF), CircleShape),
-            )
-        }
-    }
-}
-
-private const val JOYSTICK_BASE_SIZE_DP = 112
-private const val JOYSTICK_KNOB_TRAVEL_DP = 34
 // Display-area scroll: finger pixel × this = high-resolution scroll units sent to the host.
 private const val DISPLAY_SCROLL_SENSITIVITY = 3.0f
 // Trackpad tap = displacement < slop AND duration < timeout.
@@ -2641,15 +2227,7 @@ private const val MAC_PINCH_EVENT_UNITS_PER_LOG_STEP = 900f
 private const val REMOTE_TOUCH_PRESSURE = 0.5f
 private const val REMOTE_TOUCH_CONTACT_AREA = 0.02f
 
-// Mouse delta = finger delta × this. Scales gently with remote resolution so 4K hosts
-// reach across the screen without manic finger sweeps.
-private fun mouseSensitivity(plan: SunshineLaunchPlan): Float {
-    val longEdge = maxOf(plan.width, plan.height).toFloat()
-    return (longEdge / 1920f * 2.5f).coerceIn(2.0f, 4.5f)
-}
-
-// Trackpad-mode mouse sensitivity is a touch lower than the joystick — the user has the
-// full canvas to move across, so a 1:1.6 scale feels closer to a real trackpad.
+// The user has the full canvas to move across, so a 1:1.6 scale feels closer to a real trackpad.
 private fun trackpadMouseSensitivity(plan: SunshineLaunchPlan): Float {
     val longEdge = maxOf(plan.width, plan.height).toFloat()
     return (longEdge / 1920f * 1.6f).coerceIn(1.2f, 3.5f)
