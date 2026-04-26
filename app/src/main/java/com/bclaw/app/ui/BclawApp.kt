@@ -27,9 +27,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.bclaw.app.ui.devicelist.DeviceListScreen
 import com.bclaw.app.ui.pair.PairScreen
 import com.bclaw.app.ui.showcase.ShowcaseCatalogScreen
-import com.bclaw.app.ui.tabshell.TabShell
 import com.bclaw.app.ui.tabshell.session.sidecar.LiveRemoteSidecar
 import com.bclaw.app.ui.theme.BclawTheme
 
@@ -92,7 +92,7 @@ fun BclawApp() {
                     label = "bclaw-v2-root-crossfade",
                 ) { hasDevice ->
                     if (hasDevice) {
-                        TabShell()
+                        DeviceListScreen()
                     } else {
                         PairScreen()
                     }
