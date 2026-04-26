@@ -15,6 +15,7 @@ import com.bclaw.app.remote.SunshineVideoStream
 internal class RemoteImeInputView(context: Context) : View(context) {
     var streamInput: SunshineVideoStream? = null
     var textCommitInterceptor: ((String) -> Unit)? = null
+    var keyEventInterceptor: ((KeyEvent, Int, Int) -> Boolean)? = null
 
     init {
         isFocusable = true
@@ -54,10 +55,14 @@ internal class RemoteImeInputView(context: Context) : View(context) {
 
         val mappedKey = event.keyCode.toSunshineKeyCode()
         if (mappedKey != null) {
+            val modifiers = event.sunshineModifiers(mappedKey)
+            if (keyEventInterceptor?.invoke(event, mappedKey, modifiers) == true) {
+                return true
+            }
             streamInput?.sendKeyboardKey(
                 pressed = action == KeyEvent.ACTION_DOWN,
                 keyCode = mappedKey,
-                modifiers = event.sunshineModifiers(mappedKey),
+                modifiers = modifiers,
             )
             return true
         }

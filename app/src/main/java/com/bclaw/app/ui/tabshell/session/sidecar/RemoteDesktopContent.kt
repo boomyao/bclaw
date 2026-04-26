@@ -13,6 +13,7 @@ import android.net.NetworkRequest
 import android.os.Handler
 import android.os.Looper
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
@@ -106,6 +107,7 @@ import com.bclaw.app.remote.SunshineApp
 import com.bclaw.app.remote.SunshineDisplay
 import com.bclaw.app.remote.SunshineKey
 import com.bclaw.app.remote.SunshineLaunchPlan
+import com.bclaw.app.remote.SunshineModifier
 import com.bclaw.app.remote.SunshineMouseButton
 import com.bclaw.app.remote.SunshineStreamRequest
 import com.bclaw.app.remote.SunshineStreamStats
@@ -137,6 +139,20 @@ import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
+/**
+ * Pointer-input mode chosen by the user from the floating bottom-right picker.
+ *
+ *   Click    — canvas single-tap moves cursor only (no click); the picker button itself
+ *              is the clicker (tap = primary click, double-tap = double-click).
+ *   Trackpad — full trackpad emulation on canvas (1-finger move/tap, 2-finger scroll,
+ *              2-finger pinch = remote zoom, 2-finger tap = right click). Picker button
+ *              is also a click button.
+ *   Scroll   — single-finger drag on canvas = scroll wheel.
+ *   Hold     — canvas-clicks suppressed (drag-lock semantics); picker button latches the
+ *              primary mouse button down/up (drag-select etc.).
+ */
+internal enum class RemotePointerMode { Click, Trackpad, Scroll, Hold }
+
 /** Remote desktop body. Streaming-service details stay behind the bridge boundary. */
 @Composable
 fun RemoteDesktopContent(
@@ -167,10 +183,10 @@ fun RemoteDesktopContent(
     var actionInFlight by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var error by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var autoConnectAttempted by remember(bridgeBase) { mutableStateOf(false) }
-    var displayZoomMode by remember(bridgeBase) { mutableStateOf(true) }
+    var pointerMode by remember(bridgeBase) { mutableStateOf(RemotePointerMode.Click) }
+    var holdLatched by remember(bridgeBase) { mutableStateOf(false) }
     var forceLowStreamProfile by remember(bridgeBase) { mutableStateOf(false) }
     var forceH264Stream by remember(bridgeBase) { mutableStateOf(false) }
-    var dragLock by remember(bridgeBase) { mutableStateOf(false) }
     var desktopRotated by remember(bridgeBase) { mutableStateOf(false) }
     var appVisible by remember(lifecycleOwner) {
         mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
@@ -381,12 +397,12 @@ fun RemoteDesktopContent(
         refresh()
     }
 
-    // Drag-lock holds a virtual button-down on the host. When the underlying stream
+    // Hold-mode latch holds a virtual button-down on the host. When the underlying stream
     // disappears (disconnect, switch display) the host already lost the held state, so
     // clear our local mirror to keep the UI in sync.
     LaunchedEffect(activeStream) {
-        if (activeStream == null && dragLock) {
-            dragLock = false
+        if (activeStream == null && holdLatched) {
+            holdLatched = false
         }
     }
 
@@ -557,6 +573,8 @@ fun RemoteDesktopContent(
                 streamStats = streamStats,
                 error = currentError,
                 isAsleep = shouldShowWake,
+                desktopRotated = desktopRotated,
+                onToggleDesktopRotation = { desktopRotated = !desktopRotated },
                 onSelectDisplay = { selectDisplay(it) },
                 onClose = { closeAndDismiss() },
                 modifier = Modifier.fillMaxWidth(),
@@ -572,29 +590,54 @@ fun RemoteDesktopContent(
                 streamInput = activeStream,
                 desktopRotated = desktopRotated,
                 imeWindowMetrics = imeWindowMetrics,
-                onToggleDesktopRotation = { desktopRotated = !desktopRotated },
-                dragLock = dragLock,
+                pointerMode = pointerMode,
+                holdLatched = holdLatched,
+                onPointerModeChange = { next ->
+                    val stream = activeStream
+                    if (pointerMode == RemotePointerMode.Hold && holdLatched && next != RemotePointerMode.Hold) {
+                        // Mode switch with primary still latched — release before leaving Hold.
+                        stream?.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                        holdLatched = false
+                    }
+                    if (next == RemotePointerMode.Hold && !holdLatched && stream != null) {
+                        // Auto-latch when entering Hold via the popover. A non-latched Hold is
+                        // useless (canvas clicks are suppressed), so always come in armed.
+                        stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                        holdLatched = true
+                    }
+                    pointerMode = next
+                },
                 onPrimaryMouseClick = {
                     activeStream?.let { stream ->
                         stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
                         stream.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
                     }
                 },
-                onDragLockChange = { next ->
+                onPrimaryMouseDoubleClick = {
+                    activeStream?.let { stream ->
+                        stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                        stream.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                        stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                        stream.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                    }
+                },
+                onEngageHold = {
+                    // Long-press shortcut: switch to Hold mode and immediately latch the
+                    // primary button down. If already engaged, do nothing (idempotent —
+                    // tap to release).
                     val stream = activeStream
-                    if (stream != null) {
-                        stream.sendMouseButton(pressed = next, button = SunshineMouseButton.LEFT)
-                        dragLock = next
-                    } else if (!next) {
-                        dragLock = false
+                    if (stream != null && !holdLatched) {
+                        if (pointerMode != RemotePointerMode.Hold) {
+                            pointerMode = RemotePointerMode.Hold
+                        }
+                        stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                        holdLatched = true
                     }
                 },
                 loading = loading,
                 actionInFlight = actionInFlight,
                 error = currentError,
                 showWakeAction = shouldShowWake,
-                zoomMode = displayZoomMode,
-                onZoomModeChange = { displayZoomMode = it },
                 onWake = { wakeMac() },
                 onReconnect = {
                     streamAutoReconnectAttempted = false
@@ -621,16 +664,16 @@ private fun RemoteStreamSurface(
     streamInput: SunshineVideoStream?,
     desktopRotated: Boolean,
     imeWindowMetrics: RemoteImeWindowMetrics,
-    onToggleDesktopRotation: () -> Unit,
-    dragLock: Boolean,
+    pointerMode: RemotePointerMode,
+    holdLatched: Boolean,
+    onPointerModeChange: (RemotePointerMode) -> Unit,
     onPrimaryMouseClick: () -> Unit,
-    onDragLockChange: (Boolean) -> Unit,
+    onPrimaryMouseDoubleClick: () -> Unit,
+    onEngageHold: () -> Unit,
     loading: Boolean,
     actionInFlight: String?,
     error: String?,
     showWakeAction: Boolean,
-    zoomMode: Boolean,
-    onZoomModeChange: (Boolean) -> Unit,
     onWake: () -> Unit,
     onReconnect: () -> Unit,
     onSurfaceChanged: (Surface?) -> Unit,
@@ -647,6 +690,8 @@ private fun RemoteStreamSurface(
     var aiInputGenerationCount by remember { mutableIntStateOf(0) }
     val aiInputMutex = remember { Mutex() }
     val keyboardVisible = imeWindowMetrics.visible
+    var pointerModeMenuOpen by remember { mutableStateOf(false) }
+    val stickyModifiers = remember { RemoteStickyModifiers() }
     val aiInputBusy = aiInputGenerationCount > 0
     var popupAnchorSize by remember { mutableStateOf(IntSize.Zero) }
     var surfaceBoundsInWindow by remember { mutableStateOf(Rect.Zero) }
@@ -699,6 +744,25 @@ private fun RemoteStreamSurface(
     fun sendRemoteImeText(text: String) {
         val base = bridgeBase
         val stream = streamInput ?: return
+        // Accessory-bar modifiers must apply to whatever the soft IME commits next.
+        // For a single mappable char ("v", " ", "a") with a modifier active, route as a
+        // keyboard shortcut (Ctrl+V / Cmd+Space). Multi-char or unmappable text falls
+        // through to UTF-8 with the modifier dropped — still consume one-shot mods so
+        // they don't linger and surprise the next keystroke.
+        val modMask = stickyModifiers.mask()
+        if (modMask != SunshineModifier.NONE) {
+            if (text.length == 1) {
+                val vk = remoteCharToSunshineKey(text[0])
+                if (vk != null) {
+                    stream.sendKeyboardChord(keyCode = vk, modifiers = modMask)
+                    stickyModifiers.consumeOneShot()
+                    return
+                }
+            }
+            stream.sendUtf8Text(text)
+            stickyModifiers.consumeOneShot()
+            return
+        }
         if (!aiInputEnabled || text.isBlank() || base == null) {
             stream.sendUtf8Text(text)
             return
@@ -720,6 +784,21 @@ private fun RemoteStreamSurface(
                 aiInputGenerationCount = (aiInputGenerationCount - 1).coerceAtLeast(0)
             }
         }
+    }
+
+    fun sendRemoteImeKeyEvent(event: KeyEvent, keyCode: Int, eventModifiers: Int): Boolean {
+        val stream = streamInput ?: return false
+        val modMask = stickyModifiers.mask()
+        if (
+            event.action != KeyEvent.ACTION_DOWN ||
+            modMask == SunshineModifier.NONE ||
+            remoteSunshineKeyIsModifier(keyCode)
+        ) {
+            return false
+        }
+        stream.sendKeyboardChord(keyCode = keyCode, modifiers = modMask or eventModifiers)
+        stickyModifiers.consumeOneShot()
+        return true
     }
 
     LaunchedEffect(keyboardVisible) {
@@ -877,6 +956,9 @@ private fun RemoteStreamSurface(
                 update = { target ->
                     target.streamInput = streamInput
                     target.textCommitInterceptor = { text -> sendRemoteImeText(text) }
+                    target.keyEventInterceptor = { event, keyCode, modifiers ->
+                        sendRemoteImeKeyEvent(event, keyCode, modifiers)
+                    }
                 },
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -903,13 +985,12 @@ private fun RemoteStreamSurface(
                             viewportSize,
                             status?.hostPlatform,
                             bridgeBase,
-                            zoomMode,
+                            pointerMode,
                             streamInput,
-                            dragLock,
                             imeTargetView,
                         ) {
-                            if (zoomMode) {
-                                detectRemoteZoomViewportGestures(
+                            when (pointerMode) {
+                                RemotePointerMode.Click -> detectRemoteZoomViewportGestures(
                                     streamInput = streamInput,
                                     launchPlan = launchPlan,
                                     desktopRotated = canvasRotated,
@@ -922,68 +1003,123 @@ private fun RemoteStreamSurface(
                                         viewportOffset = nextOffset
                                     },
                                     view = view,
-                                )
-                            } else if (streamInput != null) {
-                                detectRemoteTrackpadGestures(
-                                    streamInput = streamInput,
-                                    launchPlan = launchPlan,
-                                    desktopRotated = canvasRotated,
-                                    renderSize = renderSize,
-                                    viewportSize = viewportSize,
-                                    viewportScale = viewportScale,
-                                    viewportOffset = viewportOffset,
-                                    hostPlatform = status?.hostPlatform,
-                                    bridgeBase = bridgeBase,
-                                    dragLock = dragLock,
-                                    view = view,
                                     onKeyboardGesture = { showRemoteKeyboard() },
+                                    onPopoverGesture = { pointerModeMenuOpen = !pointerModeMenuOpen },
                                 )
+                                RemotePointerMode.Trackpad -> if (streamInput != null) {
+                                    detectRemoteTrackpadGestures(
+                                        streamInput = streamInput,
+                                        launchPlan = launchPlan,
+                                        desktopRotated = canvasRotated,
+                                        renderSize = renderSize,
+                                        viewportSize = viewportSize,
+                                        viewportScale = viewportScale,
+                                        viewportOffset = viewportOffset,
+                                        hostPlatform = status?.hostPlatform,
+                                        bridgeBase = bridgeBase,
+                                        dragLock = false,
+                                        view = view,
+                                        onKeyboardGesture = { showRemoteKeyboard() },
+                                        onPopoverGesture = { pointerModeMenuOpen = !pointerModeMenuOpen },
+                                    )
+                                }
+                                RemotePointerMode.Scroll -> if (streamInput != null) {
+                                    detectRemoteScrollDragGesture(
+                                        streamInput = streamInput,
+                                        launchPlan = launchPlan,
+                                        desktopRotated = canvasRotated,
+                                        renderSize = renderSize,
+                                        viewportSize = viewportSize,
+                                        viewportScale = viewportScale,
+                                        viewportOffset = viewportOffset,
+                                        view = view,
+                                        onKeyboardGesture = { showRemoteKeyboard() },
+                                        onPopoverGesture = { pointerModeMenuOpen = !pointerModeMenuOpen },
+                                    )
+                                }
+                                RemotePointerMode.Hold -> if (streamInput != null) {
+                                    // Hold mode reuses the trackpad detector with dragLock = true so
+                                    // that canvas tap-clicks are suppressed; the floating button
+                                    // latches the primary button down/up.
+                                    detectRemoteTrackpadGestures(
+                                        streamInput = streamInput,
+                                        launchPlan = launchPlan,
+                                        desktopRotated = canvasRotated,
+                                        renderSize = renderSize,
+                                        viewportSize = viewportSize,
+                                        viewportScale = viewportScale,
+                                        viewportOffset = viewportOffset,
+                                        hostPlatform = status?.hostPlatform,
+                                        bridgeBase = bridgeBase,
+                                        dragLock = true,
+                                        view = view,
+                                        onKeyboardGesture = { showRemoteKeyboard() },
+                                        onPopoverGesture = { pointerModeMenuOpen = !pointerModeMenuOpen },
+                                    )
+                                }
                             }
                         },
                 )
             }
         }
         if (showControls) {
-            RemoteNativeOverlay(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(12.dp)
-                    .padding(bottom = imeBottomInsetDp)
-                    .zIndex(4f),
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            if (keyboardVisible) {
+                // Keyboard up: single full-width row with the accessory keys (scrollable)
+                // and the pointer-mode button on the right. They share the row above the
+                // soft IME so the user can reach both with one thumb.
+                RemoteNativeOverlay(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        // Sit flush against the soft IME — no vertical padding above. A
+                        // small horizontal padding keeps the bar off the screen edges.
+                        .padding(horizontal = 6.dp)
+                        .padding(bottom = imeBottomInsetDp)
+                        .zIndex(4f),
+                    wrapContent = false,
                 ) {
-                    RemoteDisplayDragLockToggle(
-                        enabled = dragLock,
-                        onClick = {
-                            if (dragLock) {
-                                onDragLockChange(false)
-                            } else {
-                                onPrimaryMouseClick()
-                            }
-                        },
-                        onLongPress = {
-                            if (!dragLock) {
-                                onDragLockChange(true)
-                            }
-                        },
-                    )
-                    RemoteDisplayKeyboardButton(
-                        keyboardVisible = keyboardVisible,
-                        aiEnabled = aiInputEnabled,
-                        aiBusy = aiInputBusy,
-                        onOpenKeyboard = { showRemoteKeyboard() },
-                        onToggleAi = { aiInputEnabled = !aiInputEnabled },
-                    )
-                    RemoteDisplayRotateToggle(
-                        rotated = desktopRotated,
-                        onToggle = onToggleDesktopRotation,
-                    )
-                    RemoteDisplayZoomToggle(
-                        zoomMode = zoomMode,
-                        onToggle = { onZoomModeChange(!zoomMode) },
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RemoteImeAccessoryBar(
+                            streamInput = streamInput,
+                            hostPlatform = status?.hostPlatform,
+                            aiEnabled = aiInputEnabled,
+                            aiBusy = aiInputBusy,
+                            onToggleAi = { aiInputEnabled = !aiInputEnabled },
+                            stickyModifiers = stickyModifiers,
+                            modifier = Modifier.weight(1f),
+                        )
+                        RemotePointerModeButton(
+                            mode = pointerMode,
+                            menuOpen = pointerModeMenuOpen,
+                            onMenuOpenChange = { pointerModeMenuOpen = it },
+                            onModeChange = onPointerModeChange,
+                            onPrimaryClick = onPrimaryMouseClick,
+                            onPrimaryDoubleClick = onPrimaryMouseDoubleClick,
+                            onLongPressEngageHold = onEngageHold,
+                        )
+                    }
+                }
+            } else {
+                // Keyboard down: just the pointer-mode button at the bottom-right corner.
+                // Three-finger canvas tap is the only way to open the IME from here.
+                RemoteNativeOverlay(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .zIndex(4f),
+                ) {
+                    RemotePointerModeButton(
+                        mode = pointerMode,
+                        menuOpen = pointerModeMenuOpen,
+                        onMenuOpenChange = { pointerModeMenuOpen = it },
+                        onModeChange = onPointerModeChange,
+                        onPrimaryClick = onPrimaryMouseClick,
+                        onPrimaryDoubleClick = onPrimaryMouseDoubleClick,
+                        onLongPressEngageHold = onEngageHold,
                     )
                 }
             }
@@ -1301,6 +1437,8 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
     viewportOffset: () -> Offset,
     onViewportTransform: (Float, Offset) -> Unit,
     view: View,
+    onKeyboardGesture: () -> Unit,
+    onPopoverGesture: () -> Unit,
 ) {
     val tapSlopPx = TRACKPAD_TAP_SLOP_DP.dp.toPx()
     awaitEachGesture {
@@ -1310,6 +1448,9 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
         var lastUptime = downTime
         var maxDisplacement = 0f
         var sawSecondPointer = false
+        var secondPointerDownTime: Long? = null
+        var sawThirdPointer = false
+        var thirdPointerDownTime: Long? = null
         var stillPressed = true
 
         while (stillPressed) {
@@ -1317,8 +1458,14 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
             val pressedChanges = event.changes.filter { it.pressed }
             val eventUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: lastUptime
 
-            if (pressedChanges.size >= 2) {
+            if (pressedChanges.size >= 2 && !sawSecondPointer) {
                 sawSecondPointer = true
+                secondPointerDownTime = eventUptime
+            }
+            if (pressedChanges.size >= 3 && !sawThirdPointer) {
+                sawThirdPointer = true
+                thirdPointerDownTime = eventUptime
+                view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
             }
             for (change in pressedChanges) {
                 initialPositions.putIfAbsent(change.id, change.position)
@@ -1363,9 +1510,24 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
             stillPressed = event.changes.any { it.pressed }
         }
 
+        if (sawThirdPointer) {
+            val popoverTapElapsed = lastUptime - (thirdPointerDownTime ?: downTime)
+            if (maxDisplacement < tapSlopPx && popoverTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
+                onPopoverGesture()
+            }
+            return@awaitEachGesture
+        }
+
+        if (sawSecondPointer) {
+            val keyboardTapElapsed = lastUptime - (secondPointerDownTime ?: downTime)
+            if (maxDisplacement < tapSlopPx && keyboardTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
+                onKeyboardGesture()
+            }
+            return@awaitEachGesture
+        }
+
         val tapElapsed = lastUptime - downTime
         if (
-            !sawSecondPointer &&
             maxDisplacement < tapSlopPx &&
             tapElapsed < TRACKPAD_TAP_TIMEOUT_MS &&
             streamInput != null
@@ -1414,6 +1576,7 @@ private suspend fun PointerInputScope.detectRemoteTrackpadGestures(
     dragLock: Boolean,
     view: View,
     onKeyboardGesture: () -> Unit,
+    onPopoverGesture: () -> Unit,
 ) {
     val tapSlopPx = TRACKPAD_TAP_SLOP_DP.dp.toPx()
     val scrollLockSlopPx = TRACKPAD_SCROLL_LOCK_SLOP_DP.dp.toPx()
@@ -1749,9 +1912,9 @@ private suspend fun PointerInputScope.detectRemoteTrackpadGestures(
         if (nativeTouchActive) finishNativeTouches()
         if (forceZoomShortcutFallback) flushPinchFallbackSteps()
         if (sawThirdPointer) {
-            val keyboardTapElapsed = lastUptime - (thirdPointerDownTime ?: downTime)
-            if (maxDisplacement < tapSlopPx && keyboardTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
-                onKeyboardGesture()
+            val popoverTapElapsed = lastUptime - (thirdPointerDownTime ?: downTime)
+            if (maxDisplacement < tapSlopPx && popoverTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
+                onPopoverGesture()
             }
             return@awaitEachGesture
         }
@@ -1769,12 +1932,13 @@ private suspend fun PointerInputScope.detectRemoteTrackpadGestures(
         } else {
             lastUptime - downTime
         }
-        val tapTimeout = if (sawSecondPointer) TRACKPAD_SECONDARY_TAP_TIMEOUT_MS else TRACKPAD_TAP_TIMEOUT_MS
+        val tapTimeout = if (sawSecondPointer) TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS else TRACKPAD_TAP_TIMEOUT_MS
         if (!handledZoomGesture && maxDisplacement < tapSlopPx && tapElapsed < tapTimeout) {
             if (sawSecondPointer) {
-                streamInput.sendMouseButton(pressed = true, button = SunshineMouseButton.RIGHT)
-                streamInput.sendMouseButton(pressed = false, button = SunshineMouseButton.RIGHT)
-                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                // 2-finger tap (no zoom/scroll/native-touch) opens the IME. Right-click
+                // is now expressed via the action-list popover (3-finger tap) or the
+                // accessory bar's modifier-aware click button.
+                onKeyboardGesture()
             } else if (!dragLock) {
                 // Skip the tap-click while drag-lock holds the left button — a stray
                 // down/up here would release the lock mid-selection.
@@ -1785,6 +1949,139 @@ private suspend fun PointerInputScope.detectRemoteTrackpadGestures(
         }
     }
 }
+}
+
+/**
+ * Pointer-mode `Scroll` canvas detector. A single-finger drag on the canvas is converted
+ * to wheel scroll units; flicks emit a short post-release momentum (mirrors the trackpad
+ * 2-finger scroll feel). No clicks, no positioning — just scroll.
+ */
+private suspend fun PointerInputScope.detectRemoteScrollDragGesture(
+    streamInput: SunshineVideoStream,
+    launchPlan: SunshineLaunchPlan,
+    desktopRotated: Boolean,
+    renderSize: IntSize,
+    viewportSize: IntSize,
+    viewportScale: Float,
+    viewportOffset: Offset,
+    view: View,
+    onKeyboardGesture: () -> Unit,
+    onPopoverGesture: () -> Unit,
+) {
+    val tapSlopPx = TRACKPAD_TAP_SLOP_DP.dp.toPx()
+    coroutineScope {
+        var scrollMomentumJob: Job? = null
+
+        awaitEachGesture {
+            val first = awaitFirstDown(requireUnconsumed = false)
+            scrollMomentumJob?.cancel()
+            scrollMomentumJob = null
+
+            val downTime = first.uptimeMillis
+            var lastUptime = downTime
+            var lastPosition = first.position
+            var maxDisplacement = 0f
+            var scrollRemainder = Offset.Zero
+            var scrollMomentumVelocity = Offset.Zero
+            var sawSecondPointer = false
+            var secondPointerDownTime: Long? = null
+            var sawThirdPointer = false
+            var thirdPointerDownTime: Long? = null
+
+            var stillPressed = true
+            while (stillPressed) {
+                val event = awaitPointerEvent()
+                val pressedChanges = event.changes.filter { it.pressed }
+                val eventUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: lastUptime
+
+                if (pressedChanges.size >= 2 && !sawSecondPointer) {
+                    sawSecondPointer = true
+                    secondPointerDownTime = eventUptime
+                }
+                if (pressedChanges.size >= 3 && !sawThirdPointer) {
+                    sawThirdPointer = true
+                    thirdPointerDownTime = eventUptime
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                }
+
+                if (pressedChanges.size == 1 && !sawSecondPointer && !sawThirdPointer) {
+                    val current = pressedChanges.first().position
+                    val pan = current - lastPosition
+                    lastPosition = current
+                    maxDisplacement = max(maxDisplacement, (current - first.position).getDistance())
+                    val remotePan = rotateRemoteDelta(pan, desktopRotated)
+                    val scrollDelta = remotePanToScrollDelta(remotePan)
+                    scrollRemainder = sendRemoteScrollDelta(
+                        streamInput = streamInput,
+                        delta = scrollDelta,
+                        remainder = scrollRemainder,
+                    )
+
+                    val elapsedSeconds = ((eventUptime - lastUptime).coerceAtLeast(1L)).toFloat() / 1000f
+                    val instantVelocity = scrollDelta / elapsedSeconds
+                    scrollMomentumVelocity = blendRemoteScrollMomentumVelocity(
+                        current = scrollMomentumVelocity,
+                        sample = instantVelocity,
+                    )
+                }
+
+                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                lastUptime = eventUptime
+                stillPressed = event.changes.any { it.pressed }
+            }
+
+            if (sawThirdPointer) {
+                val popoverTapElapsed = lastUptime - (thirdPointerDownTime ?: downTime)
+                if (popoverTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
+                    onPopoverGesture()
+                }
+                return@awaitEachGesture
+            }
+
+            if (sawSecondPointer) {
+                val keyboardTapElapsed = lastUptime - (secondPointerDownTime ?: downTime)
+                if (keyboardTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS) {
+                    onKeyboardGesture()
+                }
+                return@awaitEachGesture
+            }
+
+            val tapElapsed = lastUptime - downTime
+            if (maxDisplacement < tapSlopPx && tapElapsed < TRACKPAD_TAP_TIMEOUT_MS) {
+                // Quick single-finger tap — move the cursor to the tap point and fire a
+                // primary click. Lets users browse-and-click from Scroll mode without
+                // toggling back to Click for every link/button.
+                val normalized = remoteTouchPosition(
+                    point = first.position,
+                    desktopRotated = desktopRotated,
+                    renderSize = renderSize,
+                    viewportSize = viewportSize,
+                    viewportScale = viewportScale,
+                    viewportOffset = viewportOffset,
+                )
+                if (normalized != null) {
+                    val x = (normalized.x * (launchPlan.width - 1).coerceAtLeast(1))
+                        .roundToInt()
+                        .coerceIn(0, (launchPlan.width - 1).coerceAtLeast(0))
+                    val y = (normalized.y * (launchPlan.height - 1).coerceAtLeast(1))
+                        .roundToInt()
+                        .coerceIn(0, (launchPlan.height - 1).coerceAtLeast(0))
+                    streamInput.sendMousePosition(x, y, reliable = true)
+                    streamInput.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                    streamInput.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                    view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                }
+                return@awaitEachGesture
+            }
+
+            val initialMomentumVelocity = startRemoteScrollMomentumVelocity(scrollMomentumVelocity)
+            if (initialMomentumVelocity != Offset.Zero) {
+                scrollMomentumJob = launch {
+                    runRemoteScrollMomentum(streamInput, initialMomentumVelocity)
+                }
+            }
+        }
+    }
 }
 
 internal fun remotePanToScrollDelta(remotePan: Offset): Offset =
@@ -2013,6 +2310,8 @@ private fun RemoteTopBar(
     streamStats: SunshineStreamStats?,
     error: String?,
     isAsleep: Boolean,
+    desktopRotated: Boolean,
+    onToggleDesktopRotation: () -> Unit,
     onSelectDisplay: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
@@ -2055,6 +2354,10 @@ private fun RemoteTopBar(
                 height = 30,
             )
         }
+        RemoteTopBarRotateButton(
+            rotated = desktopRotated,
+            onToggle = onToggleDesktopRotation,
+        )
         RemoteControlButton(
             label = "×",
             accent = false,
@@ -2065,121 +2368,18 @@ private fun RemoteTopBar(
     }
 }
 
-/**
- * Floating toggle that holds the left mouse button down. Movement after this is on
- * becomes a drag-select on the host. Toggling off releases the button. Trackpad-mode
- * tap-clicks are suppressed while this is on so a stray tap doesn't break the lock.
- */
 @Composable
-private fun RemoteDisplayDragLockToggle(
-    enabled: Boolean,
-    onClick: () -> Unit,
-    onLongPress: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val view = LocalView.current
-    val bg = if (enabled) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
-    val fg = if (enabled) Color.Black else Color(0xFFD8D2BE)
-    val border = if (enabled) MetroCyan else Color(0xFF26261C)
-    Box(
-        modifier = modifier
-            .requiredSize(36.dp)
-            .background(bg)
-            .border(BorderStroke(1.dp, border))
-            .pointerInput(enabled) {
-                detectTapGestures(
-                    onTap = {
-                        onClick()
-                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
-                    },
-                    onLongPress = {
-                        if (!enabled) {
-                            onLongPress()
-                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                        }
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            painter = painterResource(
-                id = if (enabled) R.drawable.ic_remote_mouse_press else R.drawable.ic_remote_drag_lock,
-            ),
-            contentDescription = null,
-            tint = fg,
-            modifier = Modifier.size(20.dp),
-        )
-    }
-}
-
-/**
- * Opens the current Android IME while closed, then becomes the AI input proxy toggle while
- * the IME is visible.
- */
-@Composable
-private fun RemoteDisplayKeyboardButton(
-    keyboardVisible: Boolean,
-    aiEnabled: Boolean,
-    aiBusy: Boolean,
-    onOpenKeyboard: () -> Unit,
-    onToggleAi: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val type = BclawTheme.typography
-    val bg = when {
-        keyboardVisible && aiBusy -> MetroOrange
-        keyboardVisible && aiEnabled -> MetroCyan
-        else -> Color(0xFF0A0A0A).copy(alpha = 0.78f)
-    }
-    val fg = if (keyboardVisible && (aiEnabled || aiBusy)) Color.Black else Color(0xFFD8D2BE)
-    val border = when {
-        keyboardVisible && aiBusy -> MetroOrange
-        keyboardVisible && aiEnabled -> MetroCyan
-        else -> Color(0xFF26261C)
-    }
-    Box(
-        modifier = modifier
-            .requiredSize(36.dp)
-            .background(bg)
-            .border(BorderStroke(1.dp, border))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = if (keyboardVisible) onToggleAi else onOpenKeyboard,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = if (keyboardVisible) {
-                if (aiBusy) "..." else "AI"
-            } else {
-                "⌨"
-            },
-            style = if (keyboardVisible) type.mono else type.h3,
-            color = fg,
-            maxLines = 1,
-            overflow = TextOverflow.Clip,
-        )
-    }
-}
-
-/**
- * Floating toggle on the display surface that rotates the canvas 90°. Lives in the
- * bottom-right overlay row.
- */
-@Composable
-private fun RemoteDisplayRotateToggle(
+private fun RemoteTopBarRotateButton(
     rotated: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bg = if (rotated) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
+    val bg = if (rotated) MetroCyan else Color(0xFF141410)
     val fg = if (rotated) Color.Black else Color(0xFFD8D2BE)
     val border = if (rotated) MetroCyan else Color(0xFF26261C)
     Box(
         modifier = modifier
-            .requiredSize(36.dp)
+            .requiredSize(width = 30.dp, height = 30.dp)
             .background(bg)
             .border(BorderStroke(1.dp, border))
             .clickable(
@@ -2193,45 +2393,139 @@ private fun RemoteDisplayRotateToggle(
             painter = painterResource(id = R.drawable.ic_remote_rotate),
             contentDescription = null,
             tint = fg,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(18.dp),
         )
     }
 }
 
 /**
- * Floating toggle on the display surface. Off = trackpad emulation (default — 1-finger
- * move/tap, 2-finger scroll, 2-finger pinch = remote zoom, 2-finger tap = right click).
- * On = pinch-zoom + pan the local canvas. Lives in the bottom-right corner.
+ * Floating bottom-right pointer-mode picker. Tap behavior is mode-specific:
+ *  - Click / Trackpad / Scroll → primary click; double-tap → primary double-click.
+ *  - Hold → toggles latch (presses/releases primary; visual goes filled-cyan while latched).
+ * Long-press in any mode opens the popover with the four mode options.
  */
 @Composable
-private fun RemoteDisplayZoomToggle(
-    zoomMode: Boolean,
-    onToggle: () -> Unit,
+private fun RemotePointerModeButton(
+    mode: RemotePointerMode,
+    menuOpen: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
+    onModeChange: (RemotePointerMode) -> Unit,
+    onPrimaryClick: () -> Unit,
+    onPrimaryDoubleClick: () -> Unit,
+    onLongPressEngageHold: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bg = if (zoomMode) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
-    val fg = if (zoomMode) Color.Black else Color(0xFFD8D2BE)
-    val border = if (zoomMode) MetroCyan else Color(0xFF26261C)
-    Box(
-        modifier = modifier
-            .requiredSize(36.dp)
-            .background(bg)
-            .border(BorderStroke(1.dp, border))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onToggle,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            painter = painterResource(id = R.drawable.ic_remote_zoom),
-            contentDescription = null,
-            tint = fg,
-            modifier = Modifier.size(20.dp),
-        )
+    val view = LocalView.current
+
+    // The button is a toggle around Click mode. Off (default dark) = Click; On (cyan
+    // filled) = any non-Click mode. Tap in non-Click switches back to Click; tap in
+    // Click performs a primary click. Long-press always engages Hold.
+    val isOn = mode != RemotePointerMode.Click
+    val bg = if (isOn) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
+    val fg = if (isOn) Color.Black else Color(0xFFD8D2BE)
+    val border = if (isOn) MetroCyan else Color(0xFF26261C)
+
+    Box {
+        Box(
+            modifier = modifier
+                .requiredSize(width = 36.dp, height = 36.dp)
+                .background(bg)
+                .border(BorderStroke(1.dp, border))
+                .pointerInput(mode) {
+                    detectTapGestures(
+                        onTap = {
+                            if (mode == RemotePointerMode.Click) {
+                                onPrimaryClick()
+                            } else {
+                                onModeChange(RemotePointerMode.Click)
+                            }
+                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                        },
+                        onDoubleTap = {
+                            if (mode == RemotePointerMode.Click) {
+                                onPrimaryDoubleClick()
+                            } else {
+                                onModeChange(RemotePointerMode.Click)
+                            }
+                            view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                        },
+                        onLongPress = {
+                            onLongPressEngageHold()
+                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        },
+                    )
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(id = remotePointerModeIcon(mode)),
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+
+        if (menuOpen) {
+            AbovePopover(
+                onDismiss = { onMenuOpenChange(false) },
+                alignEnd = true,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .background(Color(0xFF0A0A0A))
+                        .border(BorderStroke(1.dp, Color(0xFF26261C))),
+                ) {
+                    RemotePointerMode.values().forEach { option ->
+                        val selected = option == mode
+                        Row(
+                            modifier = Modifier
+                                .requiredSize(width = 160.dp, height = 36.dp)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = {
+                                        onModeChange(option)
+                                        onMenuOpenChange(false)
+                                    },
+                                )
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                painter = painterResource(id = remotePointerModeIcon(option)),
+                                contentDescription = null,
+                                tint = if (selected) MetroCyan else Color(0xFFD8D2BE),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                text = remotePointerModeLabel(option, false),
+                                style = BclawTheme.typography.body,
+                                color = if (selected) MetroCyan else Color(0xFFD8D2BE),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+
+private fun remotePointerModeLabel(mode: RemotePointerMode, holdEngaged: Boolean): String =
+    when (mode) {
+        RemotePointerMode.Click -> "click"
+        RemotePointerMode.Trackpad -> "trackpad"
+        RemotePointerMode.Scroll -> "scroll"
+        RemotePointerMode.Hold -> if (holdEngaged) "holding…" else "hold"
+    }
+
+private fun remotePointerModeIcon(mode: RemotePointerMode): Int =
+    when (mode) {
+        RemotePointerMode.Click -> R.drawable.ic_remote_pointer
+        RemotePointerMode.Trackpad -> R.drawable.ic_remote_trackpad
+        RemotePointerMode.Scroll -> R.drawable.ic_remote_scroll
+        RemotePointerMode.Hold -> R.drawable.ic_remote_mouse_press
+    }
 
 // Display-area scroll: finger pixel × this = high-resolution scroll units sent to the host.
 private const val DISPLAY_SCROLL_SENSITIVITY = 3.0f
