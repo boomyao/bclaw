@@ -30,7 +30,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.shape.CircleShape
@@ -176,6 +175,11 @@ fun RemoteDesktopContent(
     var joystickEnabled by remember(bridgeBase) { mutableStateOf(false) }
     var dragLock by remember(bridgeBase) { mutableStateOf(false) }
     var desktopRotated by remember(bridgeBase) { mutableStateOf(false) }
+    var appVisible by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
+    var streamLeaseActive by remember(bridgeBase) { mutableStateOf(true) }
+    var streamAutoReconnectAttempted by remember(bridgeBase) { mutableStateOf(false) }
     var streamGeneration by remember(bridgeBase) { mutableIntStateOf(0) }
     var cachedWakeTargets by remember(bridgeBase) {
         mutableStateOf(loadCachedWakeTargets(context, bridgeBase))
@@ -219,13 +223,6 @@ fun RemoteDesktopContent(
         }
     }
 
-    fun closeRemoteSessionQuietly(refreshCatalog: Boolean = true) {
-        val base = bridgeBase ?: return
-        scope.launch {
-            closeRemoteSession(base, refreshCatalog)
-        }
-    }
-
     fun stopLocalStream() {
         streamGeneration += 1
         activeStream?.close()
@@ -243,6 +240,7 @@ fun RemoteDesktopContent(
             actionInFlight = "LIVE"
             error = null
             streamError = null
+            streamAutoReconnectAttempted = false
             stopLocalStream()
             runCatching {
                 startSunshineSession(
@@ -310,6 +308,7 @@ fun RemoteDesktopContent(
             actionInFlight = "DISPLAY"
             error = null
             streamError = null
+            streamAutoReconnectAttempted = false
             stopLocalStream()
             selectedDisplayId = displayId
             runCatching {
@@ -341,6 +340,10 @@ fun RemoteDesktopContent(
                 .onSuccess { sent ->
                     if (sent <= 0) error = "No Wake-on-LAN target is available yet"
                     delay(900)
+                    streamError = null
+                    error = null
+                    streamAutoReconnectAttempted = false
+                    autoConnectAttempted = false
                     refreshKey += 1
                 }
                 .onFailure { error = it.message ?: "wake failed" }
@@ -375,6 +378,12 @@ fun RemoteDesktopContent(
         }
     }
 
+    LaunchedEffect(streamStats?.stage) {
+        if (streamStats?.stage == "streaming") {
+            streamAutoReconnectAttempted = false
+        }
+    }
+
     LaunchedEffect(status, apps, selectedDisplayId, launchPlan, actionInFlight, loading) {
         if (bridgeBase == null || autoConnectAttempted || loading || actionInFlight != null || launchPlan != null) {
             return@LaunchedEffect
@@ -385,11 +394,15 @@ fun RemoteDesktopContent(
         }
     }
 
-    DisposableEffect(lifecycleOwner, bridgeBase) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
-                stopLocalStream()
-                closeRemoteSessionQuietly(refreshCatalog = false)
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    appVisible = true
+                    streamLeaseActive = true
+                }
+                Lifecycle.Event.ON_STOP -> appVisible = false
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -418,21 +431,41 @@ fun RemoteDesktopContent(
             onDispose { }
         } else {
             val previousSoftInputMode = window.attributes.softInputMode
+            val hadKeepScreenOn =
+                (window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0
             val nextSoftInputMode =
                 (previousSoftInputMode and WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
             window.setSoftInputMode(nextSoftInputMode)
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             onDispose {
                 window.setSoftInputMode(previousSoftInputMode)
+                if (!hadKeepScreenOn) {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
             }
         }
     }
 
-    DisposableEffect(bridgeBase, launchPlan, streamSurface) {
+    LaunchedEffect(appVisible, launchPlan) {
+        if (appVisible) {
+            streamLeaseActive = true
+            return@LaunchedEffect
+        }
+        if (launchPlan == null) {
+            return@LaunchedEffect
+        }
+        delay(REMOTE_STREAM_BACKGROUND_GRACE_MS)
+        streamLeaseActive = false
+        streamStats = null
+        streamError = null
+    }
+
+    DisposableEffect(bridgeBase, launchPlan, streamSurface, streamLeaseActive) {
         val base = bridgeBase
         val plan = launchPlan
         val surface = streamSurface
-        if (base == null || plan == null || surface == null || !surface.isValid) {
+        if (!streamLeaseActive || base == null || plan == null || surface == null || !surface.isValid) {
             onDispose { }
         } else {
             val generation = streamGeneration + 1
@@ -456,7 +489,10 @@ fun RemoteDesktopContent(
                         if (streamGeneration == generation) {
                             streamError = throwable.message ?: "native stream failed"
                             stopLocalStream()
-                            closeRemoteSession(base)
+                            if (appVisible && !streamAutoReconnectAttempted) {
+                                streamAutoReconnectAttempted = true
+                                connectRemote()
+                            }
                         }
                     }
                 },
@@ -489,7 +525,7 @@ fun RemoteDesktopContent(
             val wakeTargets = status?.wake?.targets.orEmpty().ifEmpty { cachedWakeTargets }
             val currentError = streamError ?: error
             val shouldShowWake = wakeTargets.isNotEmpty() &&
-                (currentError != null || status?.running == false || status?.apiAvailable == false)
+                (status?.running == false || status?.apiAvailable == false)
             RemoteTopBar(
                 status = status,
                 displays = status?.displays.orEmpty(),
@@ -516,9 +552,20 @@ fun RemoteDesktopContent(
                 joystickEnabled = joystickEnabled,
                 onJoystickToggle = { joystickEnabled = !joystickEnabled },
                 dragLock = dragLock,
+                onPrimaryMouseClick = {
+                    activeStream?.let { stream ->
+                        stream.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
+                        stream.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                    }
+                },
                 onDragLockChange = { next ->
-                    activeStream?.sendMouseButton(pressed = next, button = SunshineMouseButton.LEFT)
-                    dragLock = next
+                    val stream = activeStream
+                    if (stream != null) {
+                        stream.sendMouseButton(pressed = next, button = SunshineMouseButton.LEFT)
+                        dragLock = next
+                    } else if (!next) {
+                        dragLock = false
+                    }
                 },
                 loading = loading,
                 actionInFlight = actionInFlight,
@@ -527,6 +574,10 @@ fun RemoteDesktopContent(
                 zoomMode = displayZoomMode,
                 onZoomModeChange = { displayZoomMode = it },
                 onWake = { wakeMac() },
+                onReconnect = {
+                    streamAutoReconnectAttempted = false
+                    connectRemote()
+                },
                 onSurfaceChanged = { surface -> streamSurface = surface },
                 modifier = Modifier
                     .weight(1f)
@@ -562,6 +613,7 @@ private fun RemoteStreamSurface(
     joystickEnabled: Boolean,
     onJoystickToggle: () -> Unit,
     dragLock: Boolean,
+    onPrimaryMouseClick: () -> Unit,
     onDragLockChange: (Boolean) -> Unit,
     loading: Boolean,
     actionInFlight: String?,
@@ -570,6 +622,7 @@ private fun RemoteStreamSurface(
     zoomMode: Boolean,
     onZoomModeChange: (Boolean) -> Unit,
     onWake: () -> Unit,
+    onReconnect: () -> Unit,
     onSurfaceChanged: (Surface?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -846,31 +899,20 @@ private fun RemoteStreamSurface(
                             imeTargetView,
                         ) {
                             if (zoomMode) {
-                                detectTransformGestures { centroid, pan, zoom, _ ->
-                                    if (
-                                        viewportSize.width <= 0 ||
-                                        viewportSize.height <= 0 ||
-                                        renderSize.width <= 0 ||
-                                        renderSize.height <= 0
-                                    ) {
-                                        return@detectTransformGestures
-                                    }
-                                    val oldScale = viewportScale
-                                    val nextScale = (oldScale * zoom)
-                                        .coerceIn(REMOTE_VIEW_MIN_SCALE, REMOTE_VIEW_MAX_SCALE)
-                                    val viewportCenter = Offset(viewportSize.width / 2f, viewportSize.height / 2f)
-                                    val centroidFromCenter = centroid - viewportCenter
-                                    val scaledOffset = (viewportOffset + centroidFromCenter) * (nextScale / oldScale) -
-                                        centroidFromCenter +
-                                        pan
-                                    viewportScale = nextScale
-                                    viewportOffset = clampRemoteViewportOffset(
-                                        offset = scaledOffset,
-                                        scale = nextScale,
-                                        renderSize = renderSize,
-                                        viewportSize = viewportSize,
-                                    )
-                                }
+                                detectRemoteZoomViewportGestures(
+                                    streamInput = streamInput,
+                                    launchPlan = launchPlan,
+                                    desktopRotated = canvasRotated,
+                                    renderSize = renderSize,
+                                    viewportSize = viewportSize,
+                                    viewportScale = { viewportScale },
+                                    viewportOffset = { viewportOffset },
+                                    onViewportTransform = { nextScale, nextOffset ->
+                                        viewportScale = nextScale
+                                        viewportOffset = nextOffset
+                                    },
+                                    view = view,
+                                )
                             } else if (streamInput != null) {
                                 detectRemoteTrackpadGestures(
                                     streamInput = streamInput,
@@ -910,7 +952,18 @@ private fun RemoteStreamSurface(
                 ) {
                     RemoteDisplayDragLockToggle(
                         enabled = dragLock,
-                        onToggle = { onDragLockChange(!dragLock) },
+                        onClick = {
+                            if (dragLock) {
+                                onDragLockChange(false)
+                            } else {
+                                onPrimaryMouseClick()
+                            }
+                        },
+                        onLongPress = {
+                            if (!dragLock) {
+                                onDragLockChange(true)
+                            }
+                        },
                     )
                     RemoteDisplayKeyboardButton(
                         keyboardVisible = keyboardVisible,
@@ -1091,6 +1144,16 @@ private fun RemoteStreamSurface(
                             style = type.micro,
                             color = if (error == null) Color(0xFF76746A) else Color(0xFFFF6B5A),
                         )
+                        if (error != null && actionInFlight == null) {
+                            Spacer(Modifier.height(4.dp))
+                            RemoteControlButton(
+                                label = "RECONNECT",
+                                accent = true,
+                                onClick = onReconnect,
+                                modifier = Modifier.fillMaxWidth(),
+                                height = 38,
+                            )
+                        }
                     }
                 }
             }
@@ -1265,6 +1328,116 @@ internal fun clampRemoteViewportOffset(
         x = offset.x.coerceIn(-maxX, maxX),
         y = offset.y.coerceIn(-maxY, maxY),
     )
+}
+
+private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
+    streamInput: SunshineVideoStream?,
+    launchPlan: SunshineLaunchPlan,
+    desktopRotated: Boolean,
+    renderSize: IntSize,
+    viewportSize: IntSize,
+    viewportScale: () -> Float,
+    viewportOffset: () -> Offset,
+    onViewportTransform: (Float, Offset) -> Unit,
+    view: View,
+) {
+    val tapSlopPx = TRACKPAD_TAP_SLOP_DP.dp.toPx()
+    awaitEachGesture {
+        val first = awaitFirstDown(requireUnconsumed = false)
+        val downTime = first.uptimeMillis
+        val initialPositions = mutableMapOf(first.id to first.position)
+        var lastUptime = downTime
+        var maxDisplacement = 0f
+        var sawSecondPointer = false
+        var stillPressed = true
+
+        while (stillPressed) {
+            val event = awaitPointerEvent()
+            val pressedChanges = event.changes.filter { it.pressed }
+            val eventUptime = event.changes.maxOfOrNull { it.uptimeMillis } ?: lastUptime
+
+            if (pressedChanges.size >= 2) {
+                sawSecondPointer = true
+            }
+            for (change in pressedChanges) {
+                initialPositions.putIfAbsent(change.id, change.position)
+            }
+            for (change in event.changes) {
+                val startPosition = initialPositions[change.id]
+                if (startPosition != null) {
+                    maxDisplacement = max(maxDisplacement, (change.position - startPosition).getDistance())
+                }
+            }
+
+            val zoom = event.calculateZoom()
+            val pan = event.calculatePan()
+            if (
+                pressedChanges.isNotEmpty() &&
+                viewportSize.width > 0 &&
+                viewportSize.height > 0 &&
+                renderSize.width > 0 &&
+                renderSize.height > 0
+            ) {
+                val oldScale = viewportScale()
+                if (oldScale > 0f) {
+                    val nextScale = (oldScale * zoom)
+                        .coerceIn(REMOTE_VIEW_MIN_SCALE, REMOTE_VIEW_MAX_SCALE)
+                    val viewportCenter = Offset(viewportSize.width / 2f, viewportSize.height / 2f)
+                    val centroidFromCenter = pressedChanges.centroid() - viewportCenter
+                    val scaledOffset = (viewportOffset() + centroidFromCenter) * (nextScale / oldScale) -
+                        centroidFromCenter +
+                        pan
+                    val nextOffset = clampRemoteViewportOffset(
+                        offset = scaledOffset,
+                        scale = nextScale,
+                        renderSize = renderSize,
+                        viewportSize = viewportSize,
+                    )
+                    onViewportTransform(nextScale, nextOffset)
+                }
+            }
+
+            event.changes.forEach { if (it.positionChanged()) it.consume() }
+            lastUptime = eventUptime
+            stillPressed = event.changes.any { it.pressed }
+        }
+
+        val tapElapsed = lastUptime - downTime
+        if (
+            !sawSecondPointer &&
+            maxDisplacement < tapSlopPx &&
+            tapElapsed < TRACKPAD_TAP_TIMEOUT_MS &&
+            streamInput != null
+        ) {
+            val normalized = remoteTouchPosition(
+                point = first.position,
+                desktopRotated = desktopRotated,
+                renderSize = renderSize,
+                viewportSize = viewportSize,
+                viewportScale = viewportScale(),
+                viewportOffset = viewportOffset(),
+            ) ?: return@awaitEachGesture
+            val x = (normalized.x * (launchPlan.width - 1).coerceAtLeast(1))
+                .roundToInt()
+                .coerceIn(0, (launchPlan.width - 1).coerceAtLeast(0))
+            val y = (normalized.y * (launchPlan.height - 1).coerceAtLeast(1))
+                .roundToInt()
+                .coerceIn(0, (launchPlan.height - 1).coerceAtLeast(0))
+            streamInput.sendMousePosition(x, y, reliable = true)
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+        }
+    }
+}
+
+private fun List<PointerInputChange>.centroid(): Offset {
+    if (isEmpty()) return Offset.Zero
+    var x = 0f
+    var y = 0f
+    for (change in this) {
+        x += change.position.x
+        y += change.position.y
+    }
+    return Offset(x / size, y / size)
 }
 
 private suspend fun PointerInputScope.detectRemoteTrackpadGestures(
@@ -2134,9 +2307,11 @@ private fun RemoteDisplayJoystickToggle(
 @Composable
 private fun RemoteDisplayDragLockToggle(
     enabled: Boolean,
-    onToggle: () -> Unit,
+    onClick: () -> Unit,
+    onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val view = LocalView.current
     val bg = if (enabled) MetroCyan else Color(0xFF0A0A0A).copy(alpha = 0.78f)
     val fg = if (enabled) Color.Black else Color(0xFFD8D2BE)
     val border = if (enabled) MetroCyan else Color(0xFF26261C)
@@ -2145,15 +2320,26 @@ private fun RemoteDisplayDragLockToggle(
             .requiredSize(36.dp)
             .background(bg)
             .border(BorderStroke(1.dp, border))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onToggle,
-            ),
+            .pointerInput(enabled) {
+                detectTapGestures(
+                    onTap = {
+                        onClick()
+                        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+                    },
+                    onLongPress = {
+                        if (!enabled) {
+                            onLongPress()
+                            view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        }
+                    },
+                )
+            },
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            painter = painterResource(id = R.drawable.ic_remote_drag_lock),
+            painter = painterResource(
+                id = if (enabled) R.drawable.ic_remote_mouse_press else R.drawable.ic_remote_drag_lock,
+            ),
             contentDescription = null,
             tint = fg,
             modifier = Modifier.size(20.dp),
@@ -2787,6 +2973,7 @@ private const val RemoteReadableBitrateKbps = 14_000
 private const val RemoteWifiReadableWidth = 1920
 private const val RemoteWifiReadableHeight = 1080
 private const val RemoteWifiReadableBitrateKbps = 22_000
+private const val REMOTE_STREAM_BACKGROUND_GRACE_MS = 30_000L
 
 private fun buildReadableSunshineStreamRequest(
     app: SunshineApp?,
