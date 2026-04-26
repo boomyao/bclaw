@@ -95,6 +95,7 @@ data class SunshineLaunchPlan(
     val height: Int,
     val fps: Int,
     val bitrateKbps: Int,
+    val codec: String,
     val pairStatus: String,
     val rtspPort: Int,
     val rtspSessionUrl: String?,
@@ -142,6 +143,7 @@ data class SunshineStreamRequest(
     val height: Int = 720,
     val fps: Int = 60,
     val bitrateKbps: Int = 18_000,
+    val codec: String = "h264",
 )
 
 suspend fun fetchSunshineCatalog(base: String): SunshineCatalog = withContext(Dispatchers.IO) {
@@ -230,6 +232,7 @@ suspend fun startSunshineSession(
         .put("height", request.height)
         .put("fps", request.fps)
         .put("bitrateKbps", request.bitrateKbps)
+        .put("codec", request.codec)
         .toString()
     val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
     val httpRequest = Request.Builder()
@@ -524,6 +527,7 @@ internal fun buildSunshineAnnounceSdp(
     plan: SunshineLaunchPlan,
     videoPort: Int?,
     encryptionEnabled: Int,
+    videoCodec: String = plan.codec,
 ): String {
     val packetSize = 1024
     val adjustedBitrate = (plan.bitrateKbps * 0.80).toInt().coerceAtMost(100_000)
@@ -558,8 +562,12 @@ internal fun buildSunshineAnnounceSdp(
         appendSdpAttribute("x-nv-vqos[0].drc.enable", "0")
         appendSdpAttribute("x-nv-general.enableRecoveryMode", "0")
         appendSdpAttribute("x-nv-video[0].videoEncoderSlicesPerFrame", "1")
-        appendSdpAttribute("x-nv-clientSupportHevc", "0")
-        appendSdpAttribute("x-nv-vqos[0].bitStreamFormat", "0")
+        if (videoCodec.equals("av1", ignoreCase = true)) {
+            appendSdpAttribute("x-nv-vqos[0].bitStreamFormat", "2")
+        } else {
+            appendSdpAttribute("x-nv-clientSupportHevc", "0")
+            appendSdpAttribute("x-nv-vqos[0].bitStreamFormat", "0")
+        }
         appendSdpAttribute("x-nv-video[0].dynamicRangeMode", "0")
         appendSdpAttribute("x-nv-video[0].maxNumReferenceFrames", "1")
         appendSdpAttribute("x-nv-video[0].clientRefreshRateX100", refreshRateX100.toString())
@@ -811,6 +819,7 @@ private fun parseSunshineLaunchPlan(raw: String): SunshineLaunchPlan {
         height = stream?.optInt("height", 720) ?: 720,
         fps = stream?.optInt("fps", 60) ?: 60,
         bitrateKbps = stream?.optInt("bitrateKbps", 18_000) ?: 18_000,
+        codec = stream?.optString("codec")?.takeIf { it.isNotBlank() } ?: "h264",
         pairStatus = parsed?.optString("PairStatus")?.takeIf { it.isNotBlank() } ?: "unknown",
         rtspPort = gameStream?.optInt("rtspPort", 48010) ?: 48010,
         rtspSessionUrl = launch?.optString("sessionUrl")?.takeIf { it.isNotBlank() }

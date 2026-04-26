@@ -130,6 +130,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
@@ -151,6 +152,9 @@ fun RemoteDesktopContent(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     var status by remember(bridgeBase) { mutableStateOf<SunshineStatus?>(null) }
+    val lanConnected = remember(bridgeBase, status, wifiConnected) {
+        wifiConnected && isLanRemoteEndpoint(bridgeBase, status)
+    }
     var apps by remember(bridgeBase) { mutableStateOf(emptyList<SunshineApp>()) }
     var selectedAppIndex by remember(bridgeBase) { mutableStateOf<Int?>(null) }
     var selectedDisplayId by remember(bridgeBase) { mutableStateOf<String?>(null) }
@@ -164,6 +168,8 @@ fun RemoteDesktopContent(
     var error by remember(bridgeBase) { mutableStateOf<String?>(null) }
     var autoConnectAttempted by remember(bridgeBase) { mutableStateOf(false) }
     var displayZoomMode by remember(bridgeBase) { mutableStateOf(true) }
+    var forceLowStreamProfile by remember(bridgeBase) { mutableStateOf(false) }
+    var forceH264Stream by remember(bridgeBase) { mutableStateOf(false) }
     var dragLock by remember(bridgeBase) { mutableStateOf(false) }
     var desktopRotated by remember(bridgeBase) { mutableStateOf(false) }
     var appVisible by remember(lifecycleOwner) {
@@ -233,7 +239,13 @@ fun RemoteDesktopContent(
             runCatching {
                 startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
+                    buildReadableSunshineStreamRequest(
+                        app = app,
+                        displayId = displayId,
+                        useWifiProfile = wifiConnected && !forceLowStreamProfile,
+                        useLanProfile = lanConnected && !forceLowStreamProfile,
+                        preferAv1 = !forceH264Stream,
+                    ),
                 )
             }
                 .onSuccess { plan -> launchPlan = plan }
@@ -281,7 +293,13 @@ fun RemoteDesktopContent(
                     ?: catalog.apps.firstOrNull()
                 startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
+                    buildReadableSunshineStreamRequest(
+                        app = app,
+                        displayId = displayId,
+                        useWifiProfile = wifiConnected && !forceLowStreamProfile,
+                        useLanProfile = lanConnected && !forceLowStreamProfile,
+                        preferAv1 = !forceH264Stream,
+                    ),
                 )
             }
                 .onSuccess { plan -> launchPlan = plan }
@@ -305,7 +323,13 @@ fun RemoteDesktopContent(
                     ?: apps.firstOrNull()
                 val plan = startSunshineSession(
                     base,
-                    buildReadableSunshineStreamRequest(app, displayId, wifiConnected),
+                    buildReadableSunshineStreamRequest(
+                        app = app,
+                        displayId = displayId,
+                        useWifiProfile = wifiConnected && !forceLowStreamProfile,
+                        useLanProfile = lanConnected && !forceLowStreamProfile,
+                        preferAv1 = !forceH264Stream,
+                    ),
                 )
                 val nextCatalog = fetchSunshineCatalog(base)
                 status = nextCatalog.status
@@ -366,8 +390,8 @@ fun RemoteDesktopContent(
         }
     }
 
-    LaunchedEffect(streamStats?.stage) {
-        if (streamStats?.stage == "streaming") {
+    LaunchedEffect(streamStats?.decodedFrames) {
+        if ((streamStats?.decodedFrames ?: 0L) > 0L) {
             streamAutoReconnectAttempted = false
         }
     }
@@ -476,6 +500,18 @@ fun RemoteDesktopContent(
                     scope.launch {
                         if (streamGeneration == generation) {
                             streamError = throwable.message ?: "native stream failed"
+                            val hadDecodedFrames = (streamStats?.decodedFrames ?: 0L) > 0L
+                            val failedCodec = streamStats?.codec ?: launchPlan?.codec.orEmpty()
+                            when {
+                                !hadDecodedFrames &&
+                                    failedCodec.contains("AV1", ignoreCase = true) &&
+                                    !forceH264Stream -> {
+                                    forceH264Stream = true
+                                }
+                                !hadDecodedFrames && wifiConnected && !forceLowStreamProfile -> {
+                                    forceLowStreamProfile = true
+                                }
+                            }
                             stopLocalStream()
                             if (appVisible && !streamAutoReconnectAttempted) {
                                 streamAutoReconnectAttempted = true
@@ -2544,6 +2580,56 @@ private fun String.toBridgeHttpBase(): String =
         .replace("wss://", "https://")
         .trimEnd('/')
 
+private fun isLanRemoteEndpoint(bridgeBase: String?, status: SunshineStatus?): Boolean {
+    val hosts = buildList {
+        bridgeBase?.urlHostOrSelf()?.let(::add)
+        status?.streamHost?.takeIf { it.isNotBlank() }?.let(::add)
+        status?.streamHosts.orEmpty().filterTo(this) { it.isNotBlank() }
+    }
+    return hosts.any(::isLanHost)
+}
+
+private fun String.urlHostOrSelf(): String? {
+    val trimmed = trim()
+    if (trimmed.isEmpty()) return null
+    val uriHost = runCatching { URI(trimmed).host }.getOrNull()
+    if (!uriHost.isNullOrBlank()) return uriHost
+    val authority = trimmed
+        .substringAfter("://", trimmed)
+        .substringBefore('/')
+        .substringAfterLast('@')
+    val host = when {
+        authority.startsWith("[") -> authority.substringAfter('[').substringBefore(']')
+        authority.count { it == ':' } > 1 -> authority
+        else -> authority.substringBefore(':')
+    }
+    return host.trim('[', ']').takeIf { it.isNotBlank() }
+}
+
+private fun isLanHost(host: String): Boolean {
+    val normalized = host.trim().trim('[', ']').lowercase()
+    if (normalized == "localhost" || normalized.endsWith(".local")) return true
+    if (normalized == "::1" ||
+        normalized.startsWith("fe80:") ||
+        normalized.startsWith("fc") ||
+        normalized.startsWith("fd")
+    ) {
+        return true
+    }
+
+    val parts = normalized.split('.').mapNotNull { it.toIntOrNull() }
+    if (parts.size != 4 || parts.any { it !in 0..255 }) {
+        return false
+    }
+    val first = parts[0]
+    val second = parts[1]
+    return first == 10 ||
+        (first == 172 && second in 16..31) ||
+        (first == 192 && second == 168) ||
+        (first == 169 && second == 254) ||
+        first == 127
+}
+
 private const val RemoteReadableWidth = 1600
 private const val RemoteReadableHeight = 900
 private const val RemoteReadableFps = 30
@@ -2551,20 +2637,32 @@ private const val RemoteReadableBitrateKbps = 14_000
 private const val RemoteWifiReadableWidth = 1920
 private const val RemoteWifiReadableHeight = 1080
 private const val RemoteWifiReadableBitrateKbps = 22_000
+private const val RemoteWifiReadableAv1BitrateKbps = 14_000
+private const val RemoteLanReadableBitrateKbps = 40_000
+private const val RemoteLanReadableAv1BitrateKbps = 24_000
 private const val REMOTE_STREAM_BACKGROUND_GRACE_MS = 30_000L
 
 private fun buildReadableSunshineStreamRequest(
     app: SunshineApp?,
     displayId: String?,
-    wifiConnected: Boolean,
+    useWifiProfile: Boolean,
+    useLanProfile: Boolean,
+    preferAv1: Boolean,
 ): SunshineStreamRequest {
     return SunshineStreamRequest(
         appIndex = app?.index ?: 0,
         displayId = displayId,
-        width = if (wifiConnected) RemoteWifiReadableWidth else RemoteReadableWidth,
-        height = if (wifiConnected) RemoteWifiReadableHeight else RemoteReadableHeight,
+        width = if (useWifiProfile) RemoteWifiReadableWidth else RemoteReadableWidth,
+        height = if (useWifiProfile) RemoteWifiReadableHeight else RemoteReadableHeight,
         fps = RemoteReadableFps,
-        bitrateKbps = if (wifiConnected) RemoteWifiReadableBitrateKbps else RemoteReadableBitrateKbps,
+        bitrateKbps = when {
+            useLanProfile && preferAv1 -> RemoteLanReadableAv1BitrateKbps
+            useLanProfile -> RemoteLanReadableBitrateKbps
+            useWifiProfile && preferAv1 -> RemoteWifiReadableAv1BitrateKbps
+            useWifiProfile -> RemoteWifiReadableBitrateKbps
+            else -> RemoteReadableBitrateKbps
+        },
+        codec = if (preferAv1) "av1" else "h264",
     )
 }
 
