@@ -31,10 +31,14 @@ data class SunshineStreamStats(
     val controlEncrypted: Boolean = false,
     val packets: Long = 0,
     val dataPackets: Long = 0,
+    val parityPackets: Long = 0,
     val frames: Long = 0,
     val decodedFrames: Long = 0,
     val droppedPackets: Long = 0,
     val droppedFrames: Long = 0,
+    val fecRecoveredPackets: Long = 0,
+    val fecRecoveredBlocks: Long = 0,
+    val fecDroppedBlocks: Long = 0,
     val decoderDrops: Long = 0,
     val lastFrameIndex: Long? = null,
     val message: String? = null,
@@ -95,6 +99,10 @@ class SunshineVideoStream private constructor(
 
     fun sendKeyboardShortcut(modifierKeyCode: Int, keyCode: Int) {
         controlSession?.sendKeyboardShortcut(modifierKeyCode, keyCode)
+    }
+
+    fun sendKeyboardChord(keyCode: Int, modifiers: Int = SunshineModifier.NONE) {
+        controlSession?.sendKeyboardChord(keyCode, modifiers)
     }
 
     fun sendUtf8Text(text: String) {
@@ -171,10 +179,14 @@ class SunshineVideoStream private constructor(
                         controlConnected = true,
                         packets = counters.packets,
                         dataPackets = counters.dataPackets,
+                        parityPackets = counters.parityPackets,
                         frames = counters.frames,
                         decodedFrames = counters.decodedFrames,
                         droppedPackets = counters.droppedPackets,
                         droppedFrames = counters.droppedFrames,
+                        fecRecoveredPackets = counters.fecRecoveredPackets,
+                        fecRecoveredBlocks = counters.fecRecoveredBlocks,
+                        fecDroppedBlocks = counters.fecDroppedBlocks,
                         decoderDrops = counters.decoderDrops,
                         lastFrameIndex = counters.lastFrameIndex,
                     ),
@@ -242,6 +254,7 @@ class SunshineVideoStream private constructor(
         publishCounters: (VideoCounters) -> Unit,
     ) {
         val assembler = VideoFrameAssembler(rtsp.codec, plan.appVersion)
+        val packetQueue = VideoFecReorderer()
         val counters = VideoCounters()
         var nextPingAt = 0L
         var pingSequence = 1
@@ -251,6 +264,8 @@ class SunshineVideoStream private constructor(
         val receiveBuffer = ByteArray(4096)
         val streamStartedAt = System.nanoTime()
         var lastDecodedFrameAt = streamStartedAt
+        var nextStartupIdrRequestAt = streamStartedAt + VIDEO_STARTUP_IDR_REQUEST_NANOS
+        var startupIdrRequests = 0
 
         DatagramSocket(null).use { datagramSocket ->
             socket = datagramSocket
@@ -282,29 +297,50 @@ class SunshineVideoStream private constructor(
                         continue
                     }
                     if (parsed.isParity) {
-                        continue
+                        counters.parityPackets += 1
+                    } else {
+                        counters.dataPackets += 1
                     }
-                    counters.dataPackets += 1
-                    val frame = assembler.accept(parsed)
-                    if (frame != null) {
-                        counters.frames += 1
-                        counters.lastFrameIndex = frame.frameIndex
-                        if (videoRenderer.submit(frame)) {
-                            counters.decodedFrames += 1
-                            lastDecodedFrameAt = System.nanoTime()
-                        } else {
-                            counters.decoderDrops += 1
+                    packetQueue.accept(parsed, counters).forEach { dataPacket ->
+                        val frame = assembler.accept(dataPacket)
+                        if (frame != null) {
+                            counters.frames += 1
+                            counters.lastFrameIndex = frame.frameIndex
+                            if (videoRenderer.submit(frame)) {
+                                counters.decodedFrames += 1
+                                lastDecodedFrameAt = System.nanoTime()
+                            } else {
+                                counters.decoderDrops += 1
+                            }
                         }
                     }
                 } catch (_: SocketTimeoutException) {
                     // Keep the ping cadence tight even when video is momentarily quiet.
+                    packetQueue.expire(System.nanoTime(), counters)
                 } catch (error: SocketException) {
                     if (!closed.get()) throw error
                 }
 
-                if (System.nanoTime() >= nextPublishAt) {
+                val loopNow = System.nanoTime()
+                if (counters.decodedFrames == 0L && loopNow >= nextStartupIdrRequestAt) {
+                    startupIdrRequests += 1
+                    controlSession?.let { control ->
+                        runCatching { control.requestIdrFrame() }
+                            .onFailure { Log.w(TAG, "failed to request startup IDR frame", it) }
+                    }
+                    Log.d(
+                        TAG,
+                        "requested startup IDR frame while waiting for first decode " +
+                            "(attempt=$startupIdrRequests packets=${counters.packets} " +
+                            "data=${counters.dataPackets} parity=${counters.parityPackets} " +
+                            "recovered=${counters.fecRecoveredPackets})",
+                    )
+                    nextStartupIdrRequestAt = loopNow + VIDEO_STARTUP_IDR_RETRY_NANOS
+                }
+
+                if (loopNow >= nextPublishAt) {
                     publishCounters(counters.copy())
-                    nextPublishAt = System.nanoTime() + STATS_INTERVAL_NANOS
+                    nextPublishAt = loopNow + STATS_INTERVAL_NANOS
                 }
                 throwIfDecodeStalled(counters, lastDecodedFrameAt)
             }
@@ -328,7 +364,11 @@ private fun throwIfDecodeStalled(counters: VideoCounters, lastDecodedFrameAt: Lo
     if (counters.decodedFrames == 0L && stallNanos >= VIDEO_STARTUP_DECODE_TIMEOUT_NANOS) {
         throw SocketTimeoutException(
             "No decodable video frames after ${stallNanos.toSecondsString()} " +
-                "(packets=${counters.packets}, frames=${counters.frames}, droppedPackets=${counters.droppedPackets})",
+                "(packets=${counters.packets}, data=${counters.dataPackets}, parity=${counters.parityPackets}, " +
+                "frames=${counters.frames}, droppedPackets=${counters.droppedPackets}, " +
+                "droppedFrames=${counters.droppedFrames}, fecRecoveredPackets=${counters.fecRecoveredPackets}, " +
+                "fecRecoveredBlocks=${counters.fecRecoveredBlocks}, fecDroppedBlocks=${counters.fecDroppedBlocks}, " +
+                "decoderDrops=${counters.decoderDrops})",
         )
     }
     if (counters.decodedFrames > 0L && stallNanos >= VIDEO_DECODE_STALL_TIMEOUT_NANOS) {
@@ -650,7 +690,14 @@ private data class ParsedVideoPacket(
     val flags: Int,
     val fecCurrentBlock: Int,
     val fecLastBlock: Int,
+    val fecIndex: Int,
+    val dataPacketCount: Int,
+    val fecPercentage: Int,
+    val parityPacketCount: Int,
+    val lowestSequenceNumber: Int,
+    val nvOffset: Int,
     val isParity: Boolean,
+    val rawPacket: ByteArray,
     val payload: ByteArray,
 ) {
     val firstPacket: Boolean
@@ -661,6 +708,8 @@ private data class ParsedVideoPacket(
         }
     val lastPacket: Boolean
         get() = (flags and FLAG_EOF) != 0 && fecCurrentBlock == fecLastBlock
+    val fecEnabled: Boolean
+        get() = dataPacketCount > 0 && parityPacketCount > 0
 }
 
 private data class AssembledVideoFrame(
@@ -671,6 +720,251 @@ private data class AssembledVideoFrame(
     val isIdr: Boolean,
 )
 
+private data class VideoFecBlockKey(
+    val frameIndex: Long,
+    val blockIndex: Int,
+) : Comparable<VideoFecBlockKey> {
+    override fun compareTo(other: VideoFecBlockKey): Int =
+        when {
+            frameIndex != other.frameIndex -> frameIndex.compareTo(other.frameIndex)
+            else -> blockIndex.compareTo(other.blockIndex)
+        }
+
+    fun next(lastBlockIndex: Int): VideoFecBlockKey =
+        if (blockIndex < lastBlockIndex) {
+            copy(blockIndex = blockIndex + 1)
+        } else {
+            VideoFecBlockKey(frameIndex + 1, 0)
+        }
+}
+
+private class VideoFecReorderer {
+    private val pendingBlocks = TreeMap<VideoFecBlockKey, VideoFecBlock>()
+    private var nextDrainKey: VideoFecBlockKey? = null
+
+    fun accept(packet: ParsedVideoPacket, counters: VideoCounters): List<ParsedVideoPacket> {
+        if (!packet.fecEnabled) {
+            return if (packet.isParity) emptyList() else listOf(packet)
+        }
+
+        val now = System.nanoTime()
+        val key = VideoFecBlockKey(packet.frameIndex, packet.fecCurrentBlock)
+        if (nextDrainKey == null) {
+            nextDrainKey = VideoFecBlockKey(packet.frameIndex, 0)
+        }
+        val drainBoundary = nextDrainKey
+        if (drainBoundary != null && key < drainBoundary) {
+            return emptyList()
+        }
+
+        val block = pendingBlocks.getOrPut(key) { VideoFecBlock(packet, now) }
+        if (!block.add(packet)) {
+            counters.droppedPackets += 1
+        }
+        block.tryComplete(counters)
+        expire(now, counters)
+        return drainCompleted()
+    }
+
+    fun expire(now: Long, counters: VideoCounters) {
+        while (pendingBlocks.isNotEmpty()) {
+            val entry = pendingBlocks.firstEntry() ?: return
+            val block = entry.value
+            if (block.completedPackets != null || now - block.firstSeenAtNanos < FEC_BLOCK_STALE_NANOS) {
+                return
+            }
+            pendingBlocks.remove(entry.key)
+            counters.fecDroppedBlocks += 1
+            counters.droppedFrames += 1
+            Log.d(
+                TAG,
+                "dropping unrecoverable FEC block frame=${entry.key.frameIndex} " +
+                    "block=${entry.key.blockIndex + 1}/${block.fecLastBlock + 1} " +
+                    "data=${block.receivedDataPackets}/${block.dataPacketCount} " +
+                    "parity=${block.receivedParityPackets}/${block.parityPacketCount}",
+            )
+            val drainKey = nextDrainKey
+            if (drainKey == null || drainKey <= entry.key) {
+                nextDrainKey = entry.key.next(block.fecLastBlock)
+            }
+        }
+    }
+
+    private fun drainCompleted(): List<ParsedVideoPacket> {
+        if (pendingBlocks.isEmpty()) return emptyList()
+        if (nextDrainKey == null) {
+            nextDrainKey = pendingBlocks.firstKey()
+        }
+
+        val out = ArrayList<ParsedVideoPacket>()
+        while (pendingBlocks.isNotEmpty()) {
+            val expectedKey = nextDrainKey ?: pendingBlocks.firstKey()
+            val block = pendingBlocks[expectedKey]
+            if (block == null) {
+                val firstKey = pendingBlocks.firstKey()
+                if (expectedKey.frameIndex < firstKey.frameIndex) {
+                    nextDrainKey = VideoFecBlockKey(firstKey.frameIndex, 0)
+                    continue
+                }
+                return out
+            }
+
+            val packets = block.completedPackets ?: break
+            pendingBlocks.remove(expectedKey)
+            out += packets
+            nextDrainKey = expectedKey.next(block.fecLastBlock)
+        }
+        return out
+    }
+}
+
+private class VideoFecBlock(
+    seed: ParsedVideoPacket,
+    val firstSeenAtNanos: Long,
+) {
+    val dataPacketCount = seed.dataPacketCount
+    val parityPacketCount = seed.parityPacketCount
+    val fecLastBlock = seed.fecLastBlock
+    private val frameIndex = seed.frameIndex
+    private val fecCurrentBlock = seed.fecCurrentBlock
+    private val fecPercentage = seed.fecPercentage
+    private val lowestSequenceNumber = seed.lowestSequenceNumber
+    private val nvOffset = seed.nvOffset
+    private var shardSize = seed.rawPacket.size
+    private var templatePacket = seed.rawPacket.copyOf()
+    private val shards = arrayOfNulls<ByteArray>(dataPacketCount + parityPacketCount)
+    private val dataPresent = BooleanArray(dataPacketCount)
+    var receivedDataPackets = 0
+        private set
+    var receivedParityPackets = 0
+        private set
+    var completedPackets: List<ParsedVideoPacket>? = null
+        private set
+
+    fun add(packet: ParsedVideoPacket): Boolean {
+        if (packet.frameIndex != frameIndex ||
+            packet.fecCurrentBlock != fecCurrentBlock ||
+            packet.fecLastBlock != fecLastBlock ||
+            packet.dataPacketCount != dataPacketCount ||
+            packet.parityPacketCount != parityPacketCount ||
+            packet.lowestSequenceNumber != lowestSequenceNumber ||
+            packet.nvOffset != nvOffset
+        ) {
+            return false
+        }
+
+        val shardIndex = (packet.sequenceNumber - lowestSequenceNumber) and 0xffff
+        if (shardIndex !in shards.indices) {
+            return false
+        }
+        if (shards[shardIndex] != null) {
+            return true
+        }
+
+        growShardSize(packet.rawPacket.size)
+        shards[shardIndex] = packet.rawPacket.copyOf(shardSize)
+        templatePacket = packet.rawPacket.copyOf()
+        if (shardIndex < dataPacketCount) {
+            dataPresent[shardIndex] = true
+            receivedDataPackets += 1
+        } else {
+            receivedParityPackets += 1
+        }
+        return true
+    }
+
+    fun tryComplete(counters: VideoCounters): List<ParsedVideoPacket>? {
+        completedPackets?.let { return it }
+        if (receivedDataPackets == dataPacketCount) {
+            return assembleDataPackets(null, counters, recoveredMissingPackets = 0)
+        }
+
+        val missingDataPackets = dataPacketCount - receivedDataPackets
+        if (receivedDataPackets + receivedParityPackets < dataPacketCount ||
+            missingDataPackets > parityPacketCount
+        ) {
+            return null
+        }
+
+        val recovered = runCatching {
+            NativeEnet.nativeRecoverFec(
+                dataShards = dataPacketCount,
+                parityShards = parityPacketCount,
+                shardSize = shardSize,
+                shards = shards.copyOf(),
+            )
+        }.getOrElse {
+            Log.w(TAG, "FEC recovery failed", it)
+            null
+        } ?: return null
+
+        return assembleDataPackets(recovered, counters, recoveredMissingPackets = missingDataPackets)
+    }
+
+    private fun assembleDataPackets(
+        recovered: Array<ByteArray>?,
+        counters: VideoCounters,
+        recoveredMissingPackets: Int,
+    ): List<ParsedVideoPacket>? {
+        val out = ArrayList<ParsedVideoPacket>(dataPacketCount)
+        for (index in 0 until dataPacketCount) {
+            val raw = if (dataPresent[index]) {
+                shards[index]?.copyOf(shardSize) ?: return null
+            } else {
+                recovered?.getOrNull(index)?.copyOf(shardSize) ?: return null
+            }
+            if (!dataPresent[index]) {
+                repairRecoveredHeader(raw, index)
+            }
+            val parsed = parseSunshineVideoPacket(raw, raw.size) ?: return null
+            if (parsed.isParity) return null
+            out += parsed
+        }
+
+        completedPackets = out
+        if (recoveredMissingPackets > 0) {
+            counters.fecRecoveredPackets += recoveredMissingPackets.toLong()
+            counters.fecRecoveredBlocks += 1
+            Log.d(
+                TAG,
+                "FEC recovered $recoveredMissingPackets packet(s) " +
+                    "for frame=$frameIndex block=${fecCurrentBlock + 1}/${fecLastBlock + 1}",
+            )
+        }
+        return out
+    }
+
+    private fun repairRecoveredHeader(raw: ByteArray, dataShardIndex: Int) {
+        if (raw.size < nvOffset + NV_VIDEO_PACKET_SIZE) return
+
+        val sequenceNumber = (lowestSequenceNumber + dataShardIndex) and 0xffff
+        if (templatePacket.size >= FIXED_RTP_HEADER_SIZE && raw.size >= FIXED_RTP_HEADER_SIZE) {
+            raw[0] = templatePacket[0]
+            raw[1] = templatePacket[1]
+            System.arraycopy(templatePacket, 4, raw, 4, 8)
+            if (nvOffset > FIXED_RTP_HEADER_SIZE && templatePacket.size >= nvOffset) {
+                System.arraycopy(templatePacket, FIXED_RTP_HEADER_SIZE, raw, FIXED_RTP_HEADER_SIZE, nvOffset - FIXED_RTP_HEADER_SIZE)
+            }
+        }
+        writeU16be(raw, 2, sequenceNumber)
+        writeU32le(raw, nvOffset + 4, frameIndex)
+        raw[nvOffset + 10] = 0x10
+        raw[nvOffset + 11] = ((fecCurrentBlock shl 4) or (fecLastBlock shl 6)).toByte()
+        val fecInfo = ((dataPacketCount.toLong() and 0x3ffL) shl 22) or
+            ((dataShardIndex.toLong() and 0x3ffL) shl 12) or
+            ((fecPercentage.toLong() and 0xffL) shl 4)
+        writeU32le(raw, nvOffset + 12, fecInfo)
+    }
+
+    private fun growShardSize(nextSize: Int) {
+        if (nextSize <= shardSize) return
+        for (index in shards.indices) {
+            shards[index] = shards[index]?.copyOf(nextSize)
+        }
+        shardSize = nextSize
+    }
+}
+
 private class VideoFrameAssembler(
     private val codec: SunshineVideoCodec,
     private val appVersion: String?,
@@ -680,7 +974,7 @@ private class VideoFrameAssembler(
     private var lastPacketPayloadLength = 0
     private var seenFirst = false
     private var seenLast = false
-    private val fragments = TreeMap<Int, ByteArray>()
+    private val fragments = TreeMap<Int, FrameFragment>()
 
     fun accept(packet: ParsedVideoPacket): AssembledVideoFrame? {
         if ((packet.flags and FLAG_CONTAINS_PIC_DATA) == 0) {
@@ -718,7 +1012,10 @@ private class VideoFrameAssembler(
             payload = trimmed
         }
         if (payload.isNotEmpty()) {
-            fragments[packet.streamPacketIndex] = payload
+            fragments[packet.streamPacketIndex] = FrameFragment(
+                payload = payload,
+                startsFecBlock = (packet.flags and FLAG_SOF) != 0,
+            )
         }
         if (packet.lastPacket) {
             seenLast = true
@@ -726,15 +1023,15 @@ private class VideoFrameAssembler(
         if (!seenFirst || !seenLast || fragments.isEmpty()) {
             return null
         }
-        if (!hasContiguousFragmentKeys(fragments)) {
+        if (!hasContiguousFragments(fragments)) {
             val lostFrame = frameIndex
             reset(-1L)
             Log.d(TAG, "dropping non-contiguous frame $lostFrame")
             return null
         }
 
-        val out = ByteArrayOutputStream(fragments.values.sumOf { it.size })
-        fragments.values.forEach { out.write(it) }
+        val out = ByteArrayOutputStream(fragments.values.sumOf { it.payload.size })
+        fragments.values.forEach { out.write(it.payload) }
         val data = out.toByteArray()
         val completedFrame = frameIndex
         val completedFrameType = frameType
@@ -777,6 +1074,11 @@ private class VideoFrameAssembler(
     }
 }
 
+private data class FrameFragment(
+    val payload: ByteArray,
+    val startsFecBlock: Boolean,
+)
+
 private data class FirstPayload(
     val payload: ByteArray,
     val frameType: Int,
@@ -817,7 +1119,14 @@ private fun parseSunshineVideoPacket(data: ByteArray, length: Int): ParsedVideoP
         flags = flags,
         fecCurrentBlock = (multiFecBlocks ushr 4) and 0x3,
         fecLastBlock = (multiFecBlocks ushr 6) and 0x3,
+        fecIndex = fecIndex,
+        dataPacketCount = dataPacketCount,
+        fecPercentage = fecPercentage,
+        parityPacketCount = parityPacketCount,
+        lowestSequenceNumber = lowestSequenceNumber,
+        nvOffset = offset,
         isParity = isParity,
+        rawPacket = data.copyOf(length),
         payload = data.copyOfRange(payloadOffset, length),
     )
 }
@@ -933,11 +1242,11 @@ private fun findAnnexBStart(data: ByteArray, offset: Int): Int? {
 private fun annexBStartLength(data: ByteArray, offset: Int): Int =
     if (offset + 3 < data.size && data[offset + 2] == 1.toByte()) 3 else 4
 
-private fun hasContiguousFragmentKeys(fragments: TreeMap<Int, ByteArray>): Boolean {
+private fun hasContiguousFragments(fragments: TreeMap<Int, FrameFragment>): Boolean {
     var expected: Int? = null
-    for (key in fragments.keys) {
+    for ((key, fragment) in fragments) {
         val next = expected
-        if (next != null && key != next) {
+        if (next != null && key != next && !fragment.startsFecBlock) {
             return false
         }
         expected = (key + 1) and 0x00ff_ffff
@@ -948,10 +1257,14 @@ private fun hasContiguousFragmentKeys(fragments: TreeMap<Int, ByteArray>): Boole
 private data class VideoCounters(
     var packets: Long = 0,
     var dataPackets: Long = 0,
+    var parityPackets: Long = 0,
     var frames: Long = 0,
     var decodedFrames: Long = 0,
     var droppedPackets: Long = 0,
     var droppedFrames: Long = 0,
+    var fecRecoveredPackets: Long = 0,
+    var fecRecoveredBlocks: Long = 0,
+    var fecDroppedBlocks: Long = 0,
     var decoderDrops: Long = 0,
     var lastFrameIndex: Long? = null,
 )
@@ -971,6 +1284,18 @@ private fun readU32le(data: ByteArray, offset: Int): Long =
         ((data[offset + 1].toLong() and 0xffL) shl 8) or
         ((data[offset + 2].toLong() and 0xffL) shl 16) or
         ((data[offset + 3].toLong() and 0xffL) shl 24)
+
+private fun writeU16be(data: ByteArray, offset: Int, value: Int) {
+    data[offset] = ((value ushr 8) and 0xff).toByte()
+    data[offset + 1] = (value and 0xff).toByte()
+}
+
+private fun writeU32le(data: ByteArray, offset: Int, value: Long) {
+    data[offset] = (value and 0xffL).toByte()
+    data[offset + 1] = ((value ushr 8) and 0xffL).toByte()
+    data[offset + 2] = ((value ushr 16) and 0xffL).toByte()
+    data[offset + 3] = ((value ushr 24) and 0xffL).toByte()
+}
 
 private fun isBefore16(a: Int, b: Int): Boolean =
     (((a - b) and 0xffff) > 0x8000)
@@ -1010,5 +1335,8 @@ private const val INPUT_TIMEOUT_US = 10_000L
 private const val CONTROL_PING_INTERVAL_NANOS = 100_000_000L
 private const val VIDEO_PING_INTERVAL_NANOS = 500_000_000L
 private const val STATS_INTERVAL_NANOS = 500_000_000L
+private const val FEC_BLOCK_STALE_NANOS = 250_000_000L
+private const val VIDEO_STARTUP_IDR_REQUEST_NANOS = 1_500_000_000L
+private const val VIDEO_STARTUP_IDR_RETRY_NANOS = 2_000_000_000L
 private const val VIDEO_STARTUP_DECODE_TIMEOUT_NANOS = 8_000_000_000L
 private const val VIDEO_DECODE_STALL_TIMEOUT_NANOS = 12_000_000_000L

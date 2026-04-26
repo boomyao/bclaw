@@ -55,6 +55,24 @@ class SunshineControlStreamTest {
     }
 
     @Test
+    fun modifierMaskExpandsToExplicitModifierKeyCodes() {
+        assertEquals(
+            listOf(
+                SunshineKey.LEFT_SHIFT,
+                SunshineKey.LEFT_CONTROL,
+                SunshineKey.LEFT_ALT,
+                SunshineKey.LEFT_META,
+            ),
+            sunshineModifierKeyCodes(
+                SunshineModifier.SHIFT or
+                    SunshineModifier.CTRL or
+                    SunshineModifier.ALT or
+                    SunshineModifier.META,
+            ),
+        )
+    }
+
+    @Test
     fun sdpAttributeUIntParsesDecimalAndHexFeatureFlags() {
         assertEquals(
             3,

@@ -23,4 +23,11 @@ internal object NativeEnet {
     external fun nativeService(handle: Long, timeoutMs: Int): Int
 
     external fun nativeClose(handle: Long)
+
+    external fun nativeRecoverFec(
+        dataShards: Int,
+        parityShards: Int,
+        shardSize: Int,
+        shards: Array<ByteArray?>,
+    ): Array<ByteArray>?
 }

@@ -34,6 +34,16 @@ internal class SunshineControlSession private constructor(
         }
     }
 
+    fun requestIdrFrame() {
+        if (!encrypted) return
+        sendEncrypted(
+            type = 0x0302,
+            payload = byteArrayOf(0, 0),
+            reliable = true,
+            channelId = CTRL_CHANNEL_URGENT,
+        )
+    }
+
     fun sendMousePosition(x: Int, y: Int, referenceWidth: Int, referenceHeight: Int, reliable: Boolean = false) {
         sendInputPacket(
             buildMousePositionPacket(x, y, referenceWidth, referenceHeight),
@@ -78,6 +88,14 @@ internal class SunshineControlSession private constructor(
         sendKeyboardKey(pressed = true, keyCode = keyCode)
         sendKeyboardKey(pressed = false, keyCode = keyCode)
         sendKeyboardKey(pressed = false, keyCode = modifierKeyCode)
+    }
+
+    fun sendKeyboardChord(keyCode: Int, modifiers: Int = SunshineModifier.NONE) {
+        val modifierKeys = sunshineModifierKeyCodes(modifiers).filter { it != keyCode }
+        modifierKeys.forEach { sendKeyboardKey(pressed = true, keyCode = it) }
+        sendKeyboardKey(pressed = true, keyCode = keyCode)
+        sendKeyboardKey(pressed = false, keyCode = keyCode)
+        modifierKeys.asReversed().forEach { sendKeyboardKey(pressed = false, keyCode = it) }
     }
 
     fun sendUtf8Text(text: String) {
@@ -268,7 +286,20 @@ internal object SunshineKey {
     const val HOME = 0x24
     const val LEFT = 0x25
     const val RIGHT = 0x27
+    const val INSERT = 0x2D
     const val DELETE = 0x2E
+    const val F1 = 0x70
+    const val F2 = 0x71
+    const val F3 = 0x72
+    const val F4 = 0x73
+    const val F5 = 0x74
+    const val F6 = 0x75
+    const val F7 = 0x76
+    const val F8 = 0x77
+    const val F9 = 0x78
+    const val F10 = 0x79
+    const val F11 = 0x7A
+    const val F12 = 0x7B
     const val LEFT_SHIFT = 0xA0
     const val LEFT_CONTROL = 0xA2
     const val RIGHT_CONTROL = 0xA3
@@ -288,6 +319,13 @@ internal object SunshineModifier {
     const val CTRL = 0x02
     const val ALT = 0x04
     const val META = 0x08
+}
+
+internal fun sunshineModifierKeyCodes(modifiers: Int): List<Int> = buildList {
+    if ((modifiers and SunshineModifier.SHIFT) != 0) add(SunshineKey.LEFT_SHIFT)
+    if ((modifiers and SunshineModifier.CTRL) != 0) add(SunshineKey.LEFT_CONTROL)
+    if ((modifiers and SunshineModifier.ALT) != 0) add(SunshineKey.LEFT_ALT)
+    if ((modifiers and SunshineModifier.META) != 0) add(SunshineKey.LEFT_META)
 }
 
 internal object SunshineTouchEvent {
@@ -543,6 +581,7 @@ private inline fun String.forEachCodePointUtf8(block: (ByteArray) -> Unit) {
 
 private const val AES_GCM_TAG_LENGTH = 16
 private const val CTRL_CHANNEL_GENERIC = 0
+private const val CTRL_CHANNEL_URGENT = 1
 private const val CTRL_CHANNEL_KEYBOARD = 2
 private const val CTRL_CHANNEL_MOUSE = 3
 private const val CTRL_CHANNEL_TOUCH = 5

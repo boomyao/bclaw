@@ -2,10 +2,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 
 #include <android/log.h>
 #include <enet/enet.h>
+#include <rs.h>
 
 #define LOG_TAG "BclawEnet"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -18,6 +20,12 @@ typedef struct BclawEnetSession {
 
 static BclawEnetSession* ptr_from_handle(jlong handle) {
     return (BclawEnetSession*)(intptr_t)handle;
+}
+
+static pthread_once_t rs_once = PTHREAD_ONCE_INIT;
+
+static void init_rs_once(void) {
+    reed_solomon_init();
 }
 
 JNIEXPORT jlong JNICALL
@@ -207,4 +215,99 @@ Java_com_bclaw_app_remote_NativeEnet_nativeClose(
 
     pthread_mutex_destroy(&session->mutex);
     free(session);
+}
+
+JNIEXPORT jobjectArray JNICALL
+Java_com_bclaw_app_remote_NativeEnet_nativeRecoverFec(
+        JNIEnv* env,
+        jobject thiz,
+        jint data_shards,
+        jint parity_shards,
+        jint shard_size,
+        jobjectArray input_shards) {
+    (void)thiz;
+
+    if (data_shards <= 0 ||
+        parity_shards <= 0 ||
+        shard_size <= 0 ||
+        data_shards + parity_shards > DATA_SHARDS_MAX ||
+        input_shards == NULL ||
+        (*env)->GetArrayLength(env, input_shards) < data_shards + parity_shards) {
+        return NULL;
+    }
+
+    const int total_shards = data_shards + parity_shards;
+    uint8_t** shards = (uint8_t**)calloc((size_t)total_shards, sizeof(uint8_t*));
+    uint8_t* marks = (uint8_t*)calloc((size_t)total_shards, sizeof(uint8_t));
+    if (shards == NULL || marks == NULL) {
+        free(shards);
+        free(marks);
+        return NULL;
+    }
+
+    int present = 0;
+    for (int i = 0; i < total_shards; i++) {
+        shards[i] = (uint8_t*)calloc((size_t)shard_size, sizeof(uint8_t));
+        if (shards[i] == NULL) {
+            for (int j = 0; j < i; j++) {
+                free(shards[j]);
+            }
+            free(shards);
+            free(marks);
+            return NULL;
+        }
+
+        jbyteArray shard = (jbyteArray)(*env)->GetObjectArrayElement(env, input_shards, i);
+        if (shard == NULL) {
+            marks[i] = 1;
+            continue;
+        }
+
+        jsize length = (*env)->GetArrayLength(env, shard);
+        jsize copy_len = length < shard_size ? length : shard_size;
+        if (copy_len > 0) {
+            (*env)->GetByteArrayRegion(env, shard, 0, copy_len, (jbyte*)shards[i]);
+        }
+        (*env)->DeleteLocalRef(env, shard);
+        marks[i] = 0;
+        present++;
+    }
+
+    jobjectArray result = NULL;
+    if (present >= data_shards) {
+        pthread_once(&rs_once, init_rs_once);
+        reed_solomon* rs = reed_solomon_new(data_shards, parity_shards);
+        if (rs != NULL) {
+            int decode_result = reed_solomon_decode(rs, shards, marks, total_shards, shard_size);
+            reed_solomon_release(rs);
+
+            if (decode_result == 0) {
+                jclass byte_array_class = (*env)->FindClass(env, "[B");
+                if (byte_array_class != NULL) {
+                    result = (*env)->NewObjectArray(env, data_shards, byte_array_class, NULL);
+                    if (result != NULL) {
+                        for (int i = 0; i < data_shards; i++) {
+                            jbyteArray out = (*env)->NewByteArray(env, shard_size);
+                            if (out == NULL) {
+                                result = NULL;
+                                break;
+                            }
+                            (*env)->SetByteArrayRegion(env, out, 0, shard_size, (jbyte*)shards[i]);
+                            (*env)->SetObjectArrayElement(env, result, i, out);
+                            (*env)->DeleteLocalRef(env, out);
+                        }
+                    }
+                    (*env)->DeleteLocalRef(env, byte_array_class);
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < total_shards; i++) {
+        free(shards[i]);
+    }
+    free(shards);
+    free(marks);
+
+    return result;
 }
