@@ -25,16 +25,15 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * bclaw v2 foreground service — keeps the process alive so the controller's coroutines
- * (AcpTransport WebSockets, streaming turns) survive backgrounding + screen-off.
+ * bclaw foreground service — keeps the paired-device process state alive while the remote
+ * desktop surface is backgrounded or the screen is off.
  *
  * Lifetime:
  *   - Started by [MainActivity] when `uiState.hasActiveDevice` flips true
  *   - Stopped when `hasActiveDevice` flips false (last device removed)
  *
- * The notification reflects device + per-agent connection phase so the user gets the
- * continuous "remote machine is present" signal required by UX_V2 §0 principle 5 even when
- * the app isn't foreground.
+ * The notification reflects the active remote device. Stream lifecycle is owned by the
+ * remote desktop overlay.
  *
  * START_NOT_STICKY — if the OS kills the process, don't auto-restart the service without
  * user action. The next MainActivity launch will re-start it once it sees an active device.
@@ -67,7 +66,7 @@ class BclawForegroundService : Service() {
     /**
      * Observe [BclawV2Controller.uiState] and push a fresh notification every time the
      * connection summary changes. Dedup via distinctUntilChanged so we don't spam
-     * NotificationManager during chatty `session/update` streams.
+     * NotificationManager during DataStore emissions.
      */
     private fun observeConnectionPhase() {
         observeJob?.cancel()
@@ -85,18 +84,9 @@ class BclawForegroundService : Service() {
 
     private fun summarize(state: BclawV2UiState): String {
         val device = state.deviceBook.activeDevice?.displayName ?: return "no device paired"
-        val connected = state.agentConnections.values.count { it == AgentConnectionPhase.Connected }
-        val connecting = state.agentConnections.values.count {
-            it == AgentConnectionPhase.Connecting || it == AgentConnectionPhase.Reconnecting
-        }
-        val inflight = state.tabRuntimes.values.count { it.streamingTurnInFlight }
         return buildString {
             append(device)
-            if (connected > 0) append(" · ").append(connected).append(" agent")
-                .append(if (connected == 1) "" else "s")
-            if (connecting > 0) append(" · ").append(connecting).append(" connecting")
-            if (inflight > 0) append(" · turn in flight")
-            if (connected == 0 && connecting == 0 && inflight == 0) append(" · idle")
+            if (!state.networkAvailable) append(" · phone offline") else append(" · ready")
         }
     }
 
@@ -111,7 +101,7 @@ class BclawForegroundService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth) // v0 parity — real icon comes in polish batch
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth) // Replace with app icon in polish.
             .setContentTitle(getString(R.string.app_name))
             .setContentText(summary)
             .setOngoing(true)

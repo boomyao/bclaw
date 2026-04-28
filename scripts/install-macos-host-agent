@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+# Install bclaw's macOS host-agent runtime for beta users.
+#
+# This script intentionally owns only the Mac-side host agent:
+#   - Homebrew when missing
+#   - Node/npm for the host-agent process
+#   - Sunshine for remote desktop
+#   - ~/.bclaw/host-agent.token for pairing URLs
+#   - a per-user launchd service that starts host-agent/start.sh now and at login
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+HOST_AGENT_DIR="${REPO_DIR}/host-agent"
+
+LABEL="${BCLAW_LAUNCHD_LABEL:-dev.bclaw.host-agent}"
+PORT="${PORT:-8766}"
+TOKEN_FILE="${BCLAW_TOKEN_FILE:-${HOME}/.bclaw/host-agent.token}"
+LEGACY_TOKEN_FILE="${HOME}/.bclaw/ws.token"
+SUNSHINE_FORMULA="${BCLAW_SUNSHINE_FORMULA:-sunshine}"
+INSTALL_HOMEBREW="${BCLAW_INSTALL_HOMEBREW:-1}"
+START_SUNSHINE="${BCLAW_START_SUNSHINE:-1}"
+SUNSHINE_API_URL="${BCLAW_SUNSHINE_API_URL:-}"
+SUNSHINE_AUTH="${BCLAW_SUNSHINE_AUTH:-}"
+SUNSHINE_USER="${BCLAW_SUNSHINE_USER:-}"
+SUNSHINE_PASSWORD="${BCLAW_SUNSHINE_PASSWORD:-}"
+SUNSHINE_TLS_VERIFY="${BCLAW_SUNSHINE_TLS_VERIFY:-}"
+SUNSHINE_CONFIG="${BCLAW_SUNSHINE_CONFIG:-}"
+SUNSHINE_LOG="${BCLAW_SUNSHINE_LOG:-}"
+SUNSHINE_PREPARE_CMD="${BCLAW_SUNSHINE_PREPARE_CMD:-}"
+SUNSHINE_CLOSE_CMD="${BCLAW_SUNSHINE_CLOSE_CMD:-}"
+SUNSHINE_STREAM_HOST="${BCLAW_SUNSHINE_STREAM_HOST:-}"
+PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+LOG_DIR="${HOME}/Library/Logs/bclaw"
+
+usage() {
+  cat >&2 <<USAGE
+usage: scripts/install-macos-host-agent [--port <port>] [--no-sunshine-start]
+
+Environment overrides:
+  PORT                         Host-agent port (default: 8766)
+  BCLAW_SUNSHINE_FORMULA       Homebrew formula (default: sunshine; use sunshine-beta for beta)
+  BCLAW_INSTALL_HOMEBREW=0     Do not install Homebrew automatically
+  BCLAW_START_SUNSHINE=0       Do not start Sunshine after install
+  BCLAW_SUNSHINE_API_URL=<url> Sunshine Web UI/API URL (default in agent: https://127.0.0.1:47990)
+  BCLAW_SUNSHINE_AUTH=<value>  Sunshine Authorization header value, e.g. "Basic ..."
+  BCLAW_SUNSHINE_USER=<name>   Sunshine Web UI username for Basic auth
+  BCLAW_SUNSHINE_PASSWORD=<pw> Sunshine Web UI password for Basic auth
+  BCLAW_TOKEN_FILE=<path>      Pairing token file (default: ~/.bclaw/host-agent.token)
+  BCLAW_LAUNCHD_LABEL=<label>  launchd label (default: dev.bclaw.host-agent)
+USAGE
+  exit "${1:-1}"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --port)
+      [ "$#" -ge 2 ] || usage
+      PORT="$2"
+      shift 2
+      ;;
+    --no-sunshine-start)
+      START_SUNSHINE=0
+      shift 1
+      ;;
+    -h|--help)
+      usage 0
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+log() {
+  printf '[bclaw-install] %s\n' "$*" >&2
+}
+
+warn() {
+  printf '[bclaw-install] warning: %s\n' "$*" >&2
+}
+
+fail() {
+  printf '[bclaw-install] error: %s\n' "$*" >&2
+  exit 1
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g'
+}
+
+setup_brew_path() {
+  for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [ -x "$brew_bin" ]; then
+      eval "$("$brew_bin" shellenv)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_macos() {
+  [ "$(uname -s)" = "Darwin" ] || fail "this installer currently targets macOS only"
+  [ -f "${HOST_AGENT_DIR}/package.json" ] || fail "host-agent/package.json not found at ${HOST_AGENT_DIR}"
+}
+
+ensure_homebrew() {
+  setup_brew_path || true
+  if command -v brew >/dev/null 2>&1; then
+    log "Homebrew found: $(command -v brew)"
+    return
+  fi
+
+  [ "$INSTALL_HOMEBREW" = "1" ] || fail "Homebrew is missing; install it or unset BCLAW_INSTALL_HOMEBREW=0"
+  command -v curl >/dev/null 2>&1 || fail "curl is required to install Homebrew"
+
+  log "Homebrew not found; installing Homebrew non-interactively"
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  setup_brew_path || fail "Homebrew installed, but brew is still not on PATH"
+}
+
+ensure_node() {
+  local major
+  major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0')"
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$major" -ge 18 ]; then
+    log "Node found: $(node --version)"
+    return
+  fi
+
+  log "Installing Node.js with Homebrew"
+  brew install node
+  setup_brew_path || true
+
+  major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0')"
+  [ "$major" -ge 18 ] || fail "Node.js 18+ is required"
+}
+
+install_host_agent_deps() {
+  log "Installing host-agent npm dependencies"
+  if [ -f "${HOST_AGENT_DIR}/package-lock.json" ]; then
+    (cd "$HOST_AGENT_DIR" && npm ci --omit=dev)
+  else
+    (cd "$HOST_AGENT_DIR" && npm install --omit=dev)
+  fi
+}
+
+sunshine_binary() {
+  if [ -d /Applications/Sunshine.app ]; then
+    printf '%s\n' "/Applications/Sunshine.app"
+    return 0
+  fi
+  for candidate in \
+    "$(command -v sunshine 2>/dev/null || true)" \
+    /opt/homebrew/bin/sunshine \
+    /usr/local/bin/sunshine; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_sunshine() {
+  if sunshine_binary >/dev/null 2>&1; then
+    log "Sunshine found: $(sunshine_binary)"
+    return
+  fi
+
+  log "Installing Sunshine with Homebrew formula: ${SUNSHINE_FORMULA}"
+  brew tap LizardByte/homebrew
+  brew install "$SUNSHINE_FORMULA"
+
+  if ! sunshine_binary >/dev/null 2>&1; then
+    warn "Sunshine install finished, but the expected app/binary was not found"
+  fi
+}
+
+ensure_token() {
+  mkdir -p "$(dirname "$TOKEN_FILE")"
+  if [ -s "$TOKEN_FILE" ]; then
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    log "Pairing token exists: ${TOKEN_FILE}"
+    return
+  fi
+
+  if [ -s "$LEGACY_TOKEN_FILE" ]; then
+    log "Migrating legacy pairing token: ${LEGACY_TOKEN_FILE} -> ${TOKEN_FILE}"
+    cp "$LEGACY_TOKEN_FILE" "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    return
+  fi
+
+  log "Creating pairing token: ${TOKEN_FILE}"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32 > "$TOKEN_FILE"
+  else
+    node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex") + "\n")' > "$TOKEN_FILE"
+  fi
+  chmod 600 "$TOKEN_FILE"
+}
+
+warn_optional_macos_tools() {
+  command -v openssl >/dev/null 2>&1 || warn "openssl missing; Sunshine client certificate generation will fail until openssl is installed"
+  if ! xcrun --find clang >/dev/null 2>&1; then
+    warn "Xcode Command Line Tools are missing; remote pinch input helper will not build until 'xcode-select --install' is completed"
+  fi
+}
+
+install_launch_agent() {
+  mkdir -p "$(dirname "$PLIST")" "$LOG_DIR"
+
+  local uid escaped_label escaped_port escaped_token_file escaped_path escaped_host_agent escaped_stdout escaped_stderr
+  local escaped_sunshine_api_url escaped_sunshine_auth escaped_sunshine_user escaped_sunshine_password
+  local escaped_sunshine_tls_verify escaped_sunshine_config escaped_sunshine_log
+  local escaped_sunshine_prepare_cmd escaped_sunshine_close_cmd escaped_sunshine_stream_host
+  uid="$(id -u)"
+  escaped_label="$(xml_escape "$LABEL")"
+  escaped_port="$(xml_escape "$PORT")"
+  escaped_token_file="$(xml_escape "$TOKEN_FILE")"
+  escaped_path="$(xml_escape "${PATH}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+  escaped_host_agent="$(xml_escape "$HOST_AGENT_DIR")"
+  escaped_stdout="$(xml_escape "${LOG_DIR}/host-agent.out.log")"
+  escaped_stderr="$(xml_escape "${LOG_DIR}/host-agent.err.log")"
+  escaped_sunshine_api_url="$(xml_escape "$SUNSHINE_API_URL")"
+  escaped_sunshine_auth="$(xml_escape "$SUNSHINE_AUTH")"
+  escaped_sunshine_user="$(xml_escape "$SUNSHINE_USER")"
+  escaped_sunshine_password="$(xml_escape "$SUNSHINE_PASSWORD")"
+  escaped_sunshine_tls_verify="$(xml_escape "$SUNSHINE_TLS_VERIFY")"
+  escaped_sunshine_config="$(xml_escape "$SUNSHINE_CONFIG")"
+  escaped_sunshine_log="$(xml_escape "$SUNSHINE_LOG")"
+  escaped_sunshine_prepare_cmd="$(xml_escape "$SUNSHINE_PREPARE_CMD")"
+  escaped_sunshine_close_cmd="$(xml_escape "$SUNSHINE_CLOSE_CMD")"
+  escaped_sunshine_stream_host="$(xml_escape "$SUNSHINE_STREAM_HOST")"
+
+  log "Writing launchd service: ${PLIST}"
+  cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escaped_label}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>${escaped_host_agent}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escaped_path}</string>
+    <key>PORT</key>
+    <string>${escaped_port}</string>
+    <key>BCLAW_TOKEN_FILE</key>
+    <string>${escaped_token_file}</string>
+    <key>BCLAW_SUNSHINE_API_URL</key>
+    <string>${escaped_sunshine_api_url}</string>
+    <key>BCLAW_SUNSHINE_AUTH</key>
+    <string>${escaped_sunshine_auth}</string>
+    <key>BCLAW_SUNSHINE_USER</key>
+    <string>${escaped_sunshine_user}</string>
+    <key>BCLAW_SUNSHINE_PASSWORD</key>
+    <string>${escaped_sunshine_password}</string>
+    <key>BCLAW_SUNSHINE_TLS_VERIFY</key>
+    <string>${escaped_sunshine_tls_verify}</string>
+    <key>BCLAW_SUNSHINE_CONFIG</key>
+    <string>${escaped_sunshine_config}</string>
+    <key>BCLAW_SUNSHINE_LOG</key>
+    <string>${escaped_sunshine_log}</string>
+    <key>BCLAW_SUNSHINE_PREPARE_CMD</key>
+    <string>${escaped_sunshine_prepare_cmd}</string>
+    <key>BCLAW_SUNSHINE_CLOSE_CMD</key>
+    <string>${escaped_sunshine_close_cmd}</string>
+    <key>BCLAW_SUNSHINE_STREAM_HOST</key>
+    <string>${escaped_sunshine_stream_host}</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>exec ./start.sh</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>${escaped_stdout}</string>
+  <key>StandardErrorPath</key>
+  <string>${escaped_stderr}</string>
+</dict>
+</plist>
+PLIST
+  chmod 600 "$PLIST" 2>/dev/null || true
+
+  launchctl bootout "gui/${uid}" "$PLIST" >/dev/null 2>&1 || true
+  if ! launchctl bootstrap "gui/${uid}" "$PLIST" >/dev/null 2>&1; then
+    launchctl unload "$PLIST" >/dev/null 2>&1 || true
+    launchctl load -w "$PLIST"
+  fi
+  launchctl enable "gui/${uid}/${LABEL}" >/dev/null 2>&1 || true
+  launchctl kickstart -k "gui/${uid}/${LABEL}" >/dev/null 2>&1 || true
+}
+
+start_sunshine_once() {
+  [ "$START_SUNSHINE" = "1" ] || return 0
+
+  local sunshine
+  sunshine="$(sunshine_binary 2>/dev/null || true)"
+  [ -n "$sunshine" ] || return 0
+
+  log "Starting Sunshine once to trigger first-run setup if needed"
+  if [ -d "$sunshine" ]; then
+    open -gj "$sunshine" >/dev/null 2>&1 || warn "could not open ${sunshine}"
+  else
+    nohup "$sunshine" > "${LOG_DIR}/sunshine.out.log" 2> "${LOG_DIR}/sunshine.err.log" &
+  fi
+}
+
+wait_for_host_agent() {
+  local url="http://127.0.0.1:${PORT}/v1/host/capabilities"
+  local token
+  token="$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -H "Authorization: Bearer ${token}" "$url" >/dev/null 2>&1; then
+      log "Host agent is running: ${url}"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  warn "Host agent did not answer ${url}; check ${LOG_DIR}/host-agent.err.log"
+  return 1
+}
+
+main() {
+  require_macos
+  ensure_homebrew
+  ensure_node
+  install_host_agent_deps
+  ensure_sunshine
+  ensure_token
+  warn_optional_macos_tools
+  install_launch_agent
+  start_sunshine_once
+  wait_for_host_agent || true
+
+  cat >&2 <<DONE
+
+bclaw host-agent install complete.
+
+Pairing:
+  ${REPO_DIR}/scripts/bclaw-handoff --qr
+
+Service:
+  launchd label: ${LABEL}
+  logs: ${LOG_DIR}/host-agent.out.log and ${LOG_DIR}/host-agent.err.log
+
+DONE
+}
+
+main "$@"

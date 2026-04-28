@@ -37,7 +37,7 @@ data class BclawSpacing(
     val edgeRight: Dp = 16.dp,
 
     // Composition gaps
-    val messageGap: Dp = 20.dp,           // between sibling chat items
+    val messageGap: Dp = 20.dp,           // between sibling content items
     val sectionGap: Dp = 32.dp,           // between thematic sections
     val rowGap: Dp = 12.dp,
     val groupGap: Dp = 24.dp,

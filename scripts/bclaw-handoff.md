@@ -6,7 +6,7 @@ Mint a `bclaw2://` pairing URL for the Android client and hand it off via clipbo
 
 ```bash
 # one-time setup
-openssl rand -hex 32 > ~/.codex/ws.token && chmod 600 ~/.codex/ws.token
+mkdir -p ~/.bclaw && openssl rand -hex 32 > ~/.bclaw/host-agent.token && chmod 600 ~/.bclaw/host-agent.token
 
 # every time you want to pair
 scripts/bclaw-handoff --qr
@@ -14,40 +14,25 @@ scripts/bclaw-handoff --qr
 
 With no flags, the script:
 
-- auto-detects your Tailscale IP (falls back to the en0 LAN IP),
-- reads the token from `~/.codex/ws.token`,
-- reads the available agents from `bridge/agents.json` (currently `claude` · `codex` · `gemini`),
+- auto-detects your Tailscale IP (falls back to LAN IP via macOS `ipconfig` or Linux `ip` / `hostname -I`),
+- reads the token from `~/.bclaw/host-agent.token` (falls back to legacy `~/.bclaw/ws.token`),
+- emits a remote-desktop pairing URL,
 - copies the URL to the clipboard (macOS),
 - prints a QR on stderr you can scan from the Pair screen on the phone.
 
 Example output (URL part goes to stdout, everything else to stderr):
 
 ```
-bclaw2://100.64.1.2:8766?tok=…&agent=claude&agent=codex&agent=gemini
+bclaw2://100.64.1.2:8766?tok=…
 ```
-
-## Passing project paths
-
-v2 uses project paths (`cwd`s) to scope sessions to a folder. Zero cwds is valid — the phone defers project selection to the agent picker on first use. To pre-populate, repeat `--cwd`:
-
-```bash
-scripts/bclaw-handoff \
-  --cwd ~/projects/foo \
-  --cwd ~/projects/bar \
-  --qr
-```
-
-Paths are URL-encoded so spaces and unicode are fine.
 
 ## All flags
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--host <ws://host:port>` | auto Tailscale / LAN | Full ws URL including port |
-| `--port <n>` | `8766` | Bridge WebSocket port |
-| `--token-file <path>` | `~/.codex/ws.token` | File whose trimmed contents become `tok=…` |
-| `--agent <id>` | all keys in `bridge/agents.json` | Repeatable |
-| `--cwd <abs-path>` | none | Repeatable · URL-encoded · zero is valid |
+| `--host <http://host:port>` | auto Tailscale / LAN | Host-agent URL including port; legacy `ws://` is accepted |
+| `--port <n>` | `8766` | Host-agent port |
+| `--token-file <path>` | `~/.bclaw/host-agent.token` | File whose trimmed contents become `tok=…` |
 | `--qr` | off | Prints an ASCII QR on stderr. Requires `python3 -m pip install qrcode`. |
 
 ## Relation to SPEC_V2
@@ -60,4 +45,4 @@ The URL carries the capability token in its query string. Treat the minted URL l
 
 - don't paste it into public chat / shared docs,
 - prefer QR scan over paste when possible,
-- rotate on leak: `openssl rand -hex 32 > ~/.codex/ws.token`, then re-pair.
+- rotate on leak: `openssl rand -hex 32 > ~/.bclaw/host-agent.token`, then re-pair.

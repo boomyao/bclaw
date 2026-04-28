@@ -7,7 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
 /**
- * Ambient navigation state shared across the tab shell.
+ * Ambient navigation state shared across root-level overlays.
  *
  * Intentionally NOT a full navigation controller — the app has no backstack. This holds the
  * transient overlay flags that multiple siblings need (pair-from-drawer, future settings
@@ -17,16 +17,8 @@ import androidx.compose.runtime.setValue
  */
 @Stable
 class BclawNavigation {
-    /** True while the pair screen should be shown ON TOP of the tab shell (add another device). */
+    /** True while the pair screen should be shown on top of the device list. */
     var pairOverlayVisible: Boolean by mutableStateOf(false)
-        private set
-
-    /**
-     * True while the v2.1 design catalogue overlay is shown. Entry point lives on
-     * [com.bclaw.app.ui.tabshell.home.HomeTab] (`view design v2.1 catalogue`) — used by
-     * designers to review the full showcase without touching production navigation.
-     */
-    var showcaseOverlayVisible: Boolean by mutableStateOf(false)
         private set
 
     /** Root-level remote desktop overlay. Covers app chrome without using a platform Dialog. */
@@ -36,12 +28,10 @@ class BclawNavigation {
     fun requestPairOverlay() { pairOverlayVisible = true }
     fun dismissPairOverlay() { pairOverlayVisible = false }
 
-    fun requestShowcaseOverlay() { showcaseOverlayVisible = true }
-    fun dismissShowcaseOverlay() { showcaseOverlayVisible = false }
-
-    fun requestRemoteOverlay(bridgeWsUrl: String?, deviceName: String) {
+    fun requestRemoteOverlay(hostApiBaseUrl: String?, hostAgentToken: String?, deviceName: String) {
         remoteOverlay = RemoteOverlayRequest(
-            bridgeWsUrl = bridgeWsUrl,
+            hostApiBaseUrl = hostApiBaseUrl,
+            hostAgentToken = hostAgentToken,
             deviceName = deviceName,
         )
     }
@@ -50,7 +40,8 @@ class BclawNavigation {
 }
 
 data class RemoteOverlayRequest(
-    val bridgeWsUrl: String?,
+    val hostApiBaseUrl: String?,
+    val hostAgentToken: String?,
     val deviceName: String,
 )
 

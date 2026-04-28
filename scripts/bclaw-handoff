@@ -1,126 +1,114 @@
 #!/usr/bin/env bash
-# bclaw-handoff v2 — mint a bclaw2:// pairing URL + optional QR for the phone to scan.
+# bclaw-handoff v2 - mint a bclaw2:// pairing URL + optional QR for the phone to scan.
 #
 # What it does:
 #   1. Resolve host (Tailscale IP, falling back to LAN) + port (default 8766).
-#   2. Read the capability token from ~/.codex/ws.token (configurable).
-#   3. Pull the agent list from bridge/agents.json unless --agent was passed.
-#   4. Emit bclaw2://<host>:<port>?tok=…&agent=…&cwd=… to stdout.
-#   5. Copy to clipboard via pbcopy (macOS), and optionally render a QR on stderr.
+#   2. Read the capability token from ~/.bclaw/host-agent.token (configurable).
+#   3. Emit bclaw2://<host>:<port>?tok=… to stdout.
+#   4. Copy to clipboard via pbcopy (macOS), and optionally render a QR on stderr.
 #
 # Intended use:
 #   scripts/bclaw-handoff --qr
-#   scripts/bclaw-handoff --cwd ~/projects/foo --cwd ~/projects/bar --qr
-#   scripts/bclaw-handoff --host ws://100.64.1.2:8766 --agent codex --agent claude
+#   scripts/bclaw-handoff --host http://100.64.1.2:8766
 set -eu
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/bclaw-handoff [--host <ws://host:port>] [--port <port>]
-                             [--token-file <path>]
-                             [--agent <id>]... [--cwd <abs-path>]...
-                             [--qr]
+usage: scripts/bclaw-handoff [--host <http://host:port>] [--port <port>]
+                             [--token-file <path>] [--qr]
 
-  --host        WebSocket host (default: auto-detect Tailscale IP, fallback LAN)
-  --port        WebSocket port (default: 8766 for ACP bridge)
-  --token-file  Capability token file (default: ~/.codex/ws.token)
-  --agent       Agent id to include in the URL. Repeatable.
-                Defaults to the keys in bridge/agents.json if omitted.
-  --cwd         Absolute project path to include. Repeatable. Zero is valid.
+  --host        Host-agent URL (default: auto-detect Tailscale IP, fallback LAN)
+  --port        Host-agent port (default: 8766)
+  --token-file  Capability token file (default: ~/.bclaw/host-agent.token)
   --qr          Display QR code on stderr (requires python3 qrcode module)
 
   The phone's Pair screen accepts the URL verbatim; scan or paste.
 USAGE
-  exit 1
+  exit "${1:-1}"
 }
 
 host=""
 port="8766"
-token_file="${HOME}/.codex/ws.token"
+token_file=""
 show_qr=false
-agents=()
-cwds=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host)       [ "$#" -ge 2 ] || usage; host="$2"; shift 2 ;;
     --port)       [ "$#" -ge 2 ] || usage; port="$2"; shift 2 ;;
     --token-file) [ "$#" -ge 2 ] || usage; token_file="$2"; shift 2 ;;
-    --agent)      [ "$#" -ge 2 ] || usage; agents+=("$2"); shift 2 ;;
-    --cwd)        [ "$#" -ge 2 ] || usage; cwds+=("$2"); shift 2 ;;
     --qr)         show_qr=true; shift 1 ;;
-    -h|--help)    usage ;;
+    -h|--help)    usage 0 ;;
     *)            usage ;;
   esac
 done
 
+detect_tailscale_ip() {
+  if command -v tailscale >/dev/null 2>&1; then
+    tailscale ip -4 2>/dev/null | head -n1 || true
+    return
+  fi
+  if [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then
+    /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null | head -n1 || true
+    return
+  fi
+  true
+}
+
+detect_lan_ip() {
+  if command -v ip >/dev/null 2>&1; then
+    ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}'
+    return
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\./ {print; exit}'
+    return
+  fi
+  ipconfig getifaddr en0 2>/dev/null || true
+}
+
 # ── host resolution ─────────────────────────────────────────────────────
 if [ -z "$host" ]; then
-  ts_ip="$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null | head -n1 || true)"
+  ts_ip="$(detect_tailscale_ip)"
   if [ -n "$ts_ip" ]; then
-    host="ws://${ts_ip}:${port}"
+    host="http://${ts_ip}:${port}"
     printf 'auto-detected Tailscale IP: %s\n' "$ts_ip" >&2
   else
-    lan_ip="$(ipconfig getifaddr en0 2>/dev/null || true)"
+    lan_ip="$(detect_lan_ip)"
     if [ -n "$lan_ip" ]; then
-      host="ws://${lan_ip}:${port}"
+      host="http://${lan_ip}:${port}"
       printf 'auto-detected LAN IP: %s (Tailscale not available)\n' "$lan_ip" >&2
     else
-      printf 'cannot auto-detect IP; specify --host ws://host:port\n' >&2
+      printf 'cannot auto-detect IP; specify --host http://host:port\n' >&2
       exit 1
     fi
   fi
 fi
 
 case "$host" in
+  http://*) authority="${host#http://}" ;;
+  https://*) authority="${host#https://}" ;;
   ws://*) authority="${host#ws://}" ;;
-  *) printf '%s\n' "--host must start with ws://host:port" >&2; exit 1 ;;
+  wss://*) authority="${host#wss://}" ;;
+  *:*) authority="$host" ;;
+  *) printf '%s\n' "--host must be http://host:port or host:port" >&2; exit 1 ;;
 esac
 
 # ── token ───────────────────────────────────────────────────────────────
+if [ -z "$token_file" ]; then
+  token_file="${HOME}/.bclaw/host-agent.token"
+  if [ ! -f "$token_file" ] && [ -f "${HOME}/.bclaw/ws.token" ]; then
+    token_file="${HOME}/.bclaw/ws.token"
+  fi
+fi
+
 [ -f "$token_file" ] || { printf 'token file not found: %s\n' "$token_file" >&2; exit 1; }
 token="$(tr -d '\r\n' < "$token_file")"
 [ -n "$token" ] || { printf 'token file is empty: %s\n' "$token_file" >&2; exit 1; }
 
-# ── default agents from bridge/agents.json ──────────────────────────────
-if [ "${#agents[@]}" -eq 0 ]; then
-  script_dir="$(cd "$(dirname "$0")" && pwd)"
-  agents_json="${script_dir}/../bridge/agents.json"
-  if [ -f "$agents_json" ]; then
-    while IFS= read -r agent_name; do
-      [ -z "$agent_name" ] || agents+=("$agent_name")
-    done < <(python3 -c "
-import json, sys
-try:
-    with open('${agents_json}') as f:
-        data = json.load(f)
-    for name in data.get('agents', {}):
-        print(name)
-except Exception as err:
-    sys.stderr.write('could not parse agents.json: ' + str(err) + '\n')
-")
-    if [ "${#agents[@]}" -gt 0 ]; then
-      printf 'agents from bridge/agents.json: %s\n' "${agents[*]}" >&2
-    fi
-  else
-    printf 'no --agent given and %s missing; emitting URL with zero agents\n' "$agents_json" >&2
-  fi
-fi
+printf 'remote-desktop pairing URL\n' >&2
 
-# ── build query string ──────────────────────────────────────────────────
-urlencode() {
-  python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
-}
-
-query="tok=${token}"
-for a in "${agents[@]}"; do
-  query+="&agent=$(urlencode "$a")"
-done
-for c in "${cwds[@]}"; do
-  query+="&cwd=$(urlencode "$c")"
-done
-
-url="bclaw2://${authority}?${query}"
+url="bclaw2://${authority}?tok=${token}"
 
 # ── stdout (pipe-friendly) ──────────────────────────────────────────────
 printf '%s' "$url"
@@ -130,7 +118,7 @@ if command -v pbcopy >/dev/null 2>&1; then
   printf '%s' "$url" | pbcopy
   printf '\n(copied to clipboard)\n' >&2
 else
-  printf '\n(pbcopy unavailable — URL printed above)\n' >&2
+  printf '\n(pbcopy unavailable - URL printed above)\n' >&2
 fi
 
 # ── optional QR ─────────────────────────────────────────────────────────

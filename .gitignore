@@ -12,6 +12,7 @@ build/
 **/build/
 captures/
 .cxx/
+dist/
 
 # Local SDK path — machine-specific
 local.properties
@@ -25,8 +26,10 @@ local.properties
 # Kotlin
 .kotlin/
 
-# Node (bridge server)
+# Node (host agent)
 node_modules/
+host-agent/.sunshine-client/
+host-agent/.macos-input-helper
 bridge/.sunshine-client/
 bridge/.macos-input-helper
 

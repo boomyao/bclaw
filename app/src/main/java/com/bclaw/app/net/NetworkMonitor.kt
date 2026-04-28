@@ -11,10 +11,9 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Watches device-level network reachability so the controller can notice when the phone
- * lost / regained connectivity (Wi-Fi flip, airplane mode, leaving coverage). Does not say
- * whether a specific WebSocket is open — that still comes from OkHttp callbacks. Used as a
- * fast negative signal (stop pretending we're Connected when the radio is off) and as a
- * trigger to re-dial transports that went Offline while the user wasn't looking.
+ * lost / regained connectivity (Wi-Fi flip, airplane mode, leaving coverage). This is a
+ * fast negative signal for host and stream UI; host-agent/Sunshine reachability is checked by
+ * the remote desktop surface itself.
  *
  * The callback lifecycle follows the process: we never unregister. If you move this into
  * something shorter-lived, call [close] from its teardown.

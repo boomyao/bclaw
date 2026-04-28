@@ -27,6 +27,13 @@ private val RemoteAiInputHttpClient = RemoteHttpClient.newBuilder()
     .callTimeout(75, TimeUnit.SECONDS)
     .build()
 
+private fun Request.Builder.hostAgentAuth(token: String?): Request.Builder = apply {
+    val trimmed = token?.trim().orEmpty()
+    if (trimmed.isNotEmpty()) {
+        header("Authorization", "Bearer $trimmed")
+    }
+}
+
 data class SunshineStatus(
     val installed: Boolean,
     val appPath: String?,
@@ -146,9 +153,10 @@ data class SunshineStreamRequest(
     val codec: String = "h264",
 )
 
-suspend fun fetchSunshineCatalog(base: String): SunshineCatalog = withContext(Dispatchers.IO) {
+suspend fun fetchSunshineCatalog(base: String, token: String? = null): SunshineCatalog = withContext(Dispatchers.IO) {
     val request = Request.Builder()
-        .url("$base/remote/sunshine/catalog")
+        .url("$base/v1/sunshine/catalog")
+        .hostAgentAuth(token)
         .get()
         .build()
     RemoteHttpClient.newCall(request).execute().use { response ->
@@ -160,9 +168,10 @@ suspend fun fetchSunshineCatalog(base: String): SunshineCatalog = withContext(Di
     }
 }
 
-suspend fun invokeSunshineAction(base: String, path: String) = withContext(Dispatchers.IO) {
+suspend fun invokeSunshineAction(base: String, path: String, token: String? = null) = withContext(Dispatchers.IO) {
     val request = Request.Builder()
         .url("$base$path")
+        .hostAgentAuth(token)
         .get()
         .build()
     RemoteHttpClient.newCall(request).execute().use { response ->
@@ -173,13 +182,14 @@ suspend fun invokeSunshineAction(base: String, path: String) = withContext(Dispa
     }
 }
 
-suspend fun selectSunshineDisplay(base: String, displayId: String) = withContext(Dispatchers.IO) {
+suspend fun selectSunshineDisplay(base: String, displayId: String, token: String? = null) = withContext(Dispatchers.IO) {
     val payload = JSONObject()
         .put("displayId", displayId)
         .toString()
     val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
     val request = Request.Builder()
-        .url("$base/remote/sunshine/display/select")
+        .url("$base/v1/sunshine/display/select")
+        .hostAgentAuth(token)
         .post(body)
         .build()
     RemoteHttpClient.newCall(request).execute().use { response ->
@@ -224,6 +234,7 @@ suspend fun sendWakeOnLan(targets: List<SunshineWakeTarget>): Int = withContext(
 suspend fun startSunshineSession(
     base: String,
     request: SunshineStreamRequest,
+    token: String? = null,
 ): SunshineLaunchPlan = withContext(Dispatchers.IO) {
     val payload = JSONObject()
         .put("appIndex", request.appIndex)
@@ -236,7 +247,8 @@ suspend fun startSunshineSession(
         .toString()
     val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
     val httpRequest = Request.Builder()
-        .url("$base/remote/sunshine/session/start")
+        .url("$base/v1/sunshine/session/start")
+        .hostAgentAuth(token)
         .post(body)
         .build()
     RemoteHttpClient.newCall(httpRequest).execute().use { response ->
@@ -252,12 +264,14 @@ suspend fun startSunshineSession(
     base: String,
     app: SunshineApp?,
     displayId: String? = null,
+    token: String? = null,
 ): SunshineLaunchPlan = startSunshineSession(
     base = base,
     request = SunshineStreamRequest(appIndex = app?.index ?: 0, displayId = displayId),
+    token = token,
 )
 
-suspend fun sendRemoteMacosPinch(base: String, amount: Int) {
+suspend fun sendRemoteMacosPinch(base: String, amount: Int, token: String? = null) {
     if (amount == 0) return
     withContext(Dispatchers.IO) {
         val payload = JSONObject()
@@ -265,7 +279,8 @@ suspend fun sendRemoteMacosPinch(base: String, amount: Int) {
             .toString()
         val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
         val request = Request.Builder()
-            .url("$base/remote/input/macos/pinch")
+            .url("$base/v1/input/macos/pinch")
+            .hostAgentAuth(token)
             .post(body)
             .build()
         RemoteHttpClient.newCall(request).execute().use { response ->
@@ -282,6 +297,7 @@ suspend fun generateRemoteAiInputText(
     instruction: String,
     model: String = "gpt-5.4-mini",
     reasoningEffort: String = "none",
+    token: String? = null,
 ): RemoteAiInputResult = withContext(Dispatchers.IO) {
     val payload = JSONObject()
         .put("instruction", instruction)
@@ -290,7 +306,8 @@ suspend fun generateRemoteAiInputText(
         .toString()
     val body = payload.toRequestBody("application/json; charset=utf-8".toMediaType())
     val request = Request.Builder()
-        .url("$base/remote/input/ai/text")
+        .url("$base/v1/input/ai/text")
+        .hostAgentAuth(token)
         .post(body)
         .build()
     RemoteAiInputHttpClient.newCall(request).execute().use { response ->
@@ -478,14 +495,14 @@ internal fun resolveSunshineTargetHost(base: String, plan: SunshineLaunchPlan): 
 }
 
 internal fun resolveSunshineTargetHosts(base: String, plan: SunshineLaunchPlan): List<String> {
-    val bridgeHost = URI(base).host ?: throw IOException("missing bridge host")
+    val hostAgentHost = URI(base).host ?: throw IOException("missing host-agent host")
     val sessionHost = plan.rtspSessionUrl
         ?.let { runCatching { URI(it).host }.getOrNull() }
-    return listOf(bridgeHost, sessionHost)
+    return listOf(hostAgentHost, sessionHost)
         .plus(plan.streamHosts)
         .mapNotNull(::normalizeSunshineTargetHost)
         .distinct()
-        .ifEmpty { listOf(bridgeHost) }
+        .ifEmpty { listOf(hostAgentHost) }
 }
 
 private fun normalizeSunshineTargetHost(host: String?): String? {

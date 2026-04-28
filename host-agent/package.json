@@ -1,0 +1,16 @@
+{
+  "name": "bclaw-host-agent",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Remote-desktop-first host agent for bclaw",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup:mac": "../scripts/install-macos-host-agent",
+    "setup:linux": "../scripts/install-linux-host-agent",
+    "setup:ubuntu": "../scripts/install-ubuntu-host-agent"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

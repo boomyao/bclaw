@@ -1,0 +1,252 @@
+package com.bclaw.app.ui.remote
+
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntSize
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class RemoteTrackpadGestureClassifierTest {
+    @Test
+    fun scrollLocksWhenPanDominatesPinchDrift() {
+        val gesture = classifyRemoteTrackpadTwoFingerGesture(
+            panDistance = 100f,
+            spanDelta = 20f,
+            cumulativeZoom = 1.1f,
+            scrollSlopPx = 8f,
+            pinchSlopPx = 18f,
+        )
+
+        assertEquals(RemoteTrackpadTwoFingerGesture.Scroll, gesture)
+    }
+
+    @Test
+    fun zoomLocksWhenSpanChangeDominatesPan() {
+        val gesture = classifyRemoteTrackpadTwoFingerGesture(
+            panDistance = 8f,
+            spanDelta = 28f,
+            cumulativeZoom = 1.12f,
+            scrollSlopPx = 8f,
+            pinchSlopPx = 18f,
+        )
+
+        assertEquals(RemoteTrackpadTwoFingerGesture.Zoom, gesture)
+    }
+
+    @Test
+    fun ambiguousEarlyMotionStaysPending() {
+        val gesture = classifyRemoteTrackpadTwoFingerGesture(
+            panDistance = 5f,
+            spanDelta = 6f,
+            cumulativeZoom = 1.03f,
+            scrollSlopPx = 8f,
+            pinchSlopPx = 18f,
+        )
+
+        assertNull(gesture)
+    }
+
+    @Test
+    fun tinyEarlyMotionStaysPending() {
+        val gesture = classifyRemoteTrackpadTwoFingerGesture(
+            panDistance = 3f,
+            spanDelta = 4f,
+            cumulativeZoom = 1.03f,
+            scrollSlopPx = 8f,
+            pinchSlopPx = 18f,
+        )
+
+        assertNull(gesture)
+    }
+
+    @Test
+    fun scrollMomentumStartsOnlyForFastScrolls() {
+        val slow = startRemoteScrollMomentumVelocity(Offset(x = 0f, y = 180f))
+        val fast = startRemoteScrollMomentumVelocity(Offset(x = 0f, y = 600f))
+
+        assertEquals(0f, slow.getDistance(), 0.0001f)
+        assertTrue(fast.y > 0f)
+        assertTrue(fast.y < 600f)
+    }
+
+    @Test
+    fun remoteScrollYMatchesMacTrackpadDirection() {
+        val delta = remotePanToScrollDelta(Offset(x = 0f, y = 10f))
+
+        assertEquals(30f, delta.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteScrollRemainderKeepsSubUnitMotion() {
+        val first = unsentRemoteScrollRemainder(
+            remainder = Offset.Zero,
+            delta = Offset(x = 0f, y = 0.4f),
+        )
+        val second = unsentRemoteScrollRemainder(
+            remainder = first,
+            delta = Offset(x = 0f, y = 0.4f),
+        )
+
+        assertEquals(0.4f, first.y, 0.0001f)
+        assertEquals(0.8f, second.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteZoomTouchPositionDampensSpanChange() {
+        val damped = dampRemoteZoomTouchPosition(
+            startPosition = Offset(x = 90f, y = 100f),
+            currentPosition = Offset(x = 70f, y = 100f),
+            startCentroid = Offset(x = 100f, y = 100f),
+            currentCentroid = Offset(x = 100f, y = 100f),
+            gain = 0.4f,
+        )
+
+        assertEquals(82f, damped.x, 0.0001f)
+        assertEquals(100f, damped.y, 0.0001f)
+    }
+
+    @Test
+    fun scrollMomentumVelocityDecays() {
+        val decayed = decayRemoteScrollMomentumVelocity(
+            velocity = Offset(x = 0f, y = 1_000f),
+            elapsedMs = 16L,
+        )
+
+        assertTrue(decayed.y > 0f)
+        assertTrue(decayed.y < 1_000f)
+    }
+
+    @Test
+    fun remoteViewportClampMatchesFullViewportWhenImeIsInactive() {
+        val clamped = clampRemoteViewportOffset(
+            offset = Offset(x = 1_000f, y = 1_000f),
+            scale = 2f,
+            renderSize = IntSize(width = 300, height = 200),
+            viewportSize = IntSize(width = 100, height = 100),
+        )
+
+        assertEquals(250f, clamped.x, 0.0001f)
+        assertEquals(150f, clamped.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportClampDoesNotPanUnzoomedCanvasThatFitsVisibleArea() {
+        val clamped = clampRemoteViewportOffset(
+            offset = Offset(x = 0f, y = 1_000f),
+            scale = 1f,
+            renderSize = IntSize(width = 800, height = 400),
+            viewportSize = IntSize(width = 400, height = 500),
+        )
+
+        assertEquals(0f, clamped.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportClampUsesCurrentVisibleViewportHeight() {
+        val clamped = clampRemoteViewportOffset(
+            offset = Offset(x = 0f, y = 1_000f),
+            scale = 3f,
+            renderSize = IntSize(width = 400, height = 400),
+            viewportSize = IntSize(width = 400, height = 500),
+        )
+
+        assertEquals(350f, clamped.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportClampTightensAgainWhenVisibleViewportGrows() {
+        val clamped = clampRemoteViewportOffset(
+            offset = Offset(x = 0f, y = 1_000f),
+            scale = 3f,
+            renderSize = IntSize(width = 400, height = 400),
+            viewportSize = IntSize(width = 400, height = 800),
+        )
+
+        assertEquals(200f, clamped.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportGesturePansCanvas() {
+        val transform = remoteViewportTransformForGesture(
+            oldScale = 2f,
+            oldOffset = Offset.Zero,
+            zoom = 1f,
+            pan = Offset(x = 20f, y = -10f),
+            centroid = Offset(x = 100f, y = 100f),
+            renderSize = IntSize(width = 400, height = 400),
+            viewportSize = IntSize(width = 200, height = 200),
+        )
+
+        requireNotNull(transform)
+        assertEquals(2f, transform.scale, 0.0001f)
+        assertEquals(20f, transform.offset.x, 0.0001f)
+        assertEquals(-10f, transform.offset.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportGestureZoomsAroundCentroid() {
+        val transform = remoteViewportTransformForGesture(
+            oldScale = 1f,
+            oldOffset = Offset.Zero,
+            zoom = 2f,
+            pan = Offset.Zero,
+            centroid = Offset(x = 150f, y = 100f),
+            renderSize = IntSize(width = 400, height = 400),
+            viewportSize = IntSize(width = 200, height = 200),
+        )
+
+        requireNotNull(transform)
+        assertEquals(2f, transform.scale, 0.0001f)
+        assertEquals(50f, transform.offset.x, 0.0001f)
+        assertEquals(0f, transform.offset.y, 0.0001f)
+    }
+
+    @Test
+    fun remoteViewportGestureRejectsInvalidZoom() {
+        val transform = remoteViewportTransformForGesture(
+            oldScale = 1f,
+            oldOffset = Offset.Zero,
+            zoom = 0f,
+            pan = Offset.Zero,
+            centroid = Offset(x = 100f, y = 100f),
+            renderSize = IntSize(width = 400, height = 400),
+            viewportSize = IntSize(width = 200, height = 200),
+        )
+
+        assertNull(transform)
+    }
+
+    @Test
+    fun remoteImeViewportIgnoresStaleBottomInsetWhenImeIsNotVisible() {
+        val height = remoteImeConstrainedViewportHeightPx(
+            isPortrait = true,
+            imeWindowMetrics = RemoteImeWindowMetrics(
+                bottomPx = 320,
+                rootHeightPx = 900,
+                visible = false,
+            ),
+            surfaceBoundsInWindow = Rect(left = 0f, top = 100f, right = 400f, bottom = 700f),
+            surfaceSize = IntSize(width = 400, height = 600),
+        )
+
+        assertEquals(600, height)
+    }
+
+    @Test
+    fun remoteImeViewportShrinksOnlyWhileImeIsVisible() {
+        val height = remoteImeConstrainedViewportHeightPx(
+            isPortrait = true,
+            imeWindowMetrics = RemoteImeWindowMetrics(
+                bottomPx = 320,
+                rootHeightPx = 900,
+                visible = true,
+            ),
+            surfaceBoundsInWindow = Rect(left = 0f, top = 100f, right = 400f, bottom = 700f),
+            surfaceSize = IntSize(width = 400, height = 600),
+        )
+
+        assertEquals(480, height)
+    }
+}

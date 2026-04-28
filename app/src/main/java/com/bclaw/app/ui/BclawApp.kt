@@ -29,8 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.bclaw.app.ui.devicelist.DeviceListScreen
 import com.bclaw.app.ui.pair.PairScreen
-import com.bclaw.app.ui.showcase.ShowcaseCatalogScreen
-import com.bclaw.app.ui.tabshell.session.sidecar.LiveRemoteSidecar
+import com.bclaw.app.ui.remote.LiveRemoteOverlay
 import com.bclaw.app.ui.theme.BclawTheme
 
 /**
@@ -38,11 +37,11 @@ import com.bclaw.app.ui.theme.BclawTheme
  *
  * Cross-fades between the two app-level surfaces:
  *   - [PairScreen] when no device is active (first run, or after removing the last device)
- *   - [TabShell] when a device is active (UX_V2 §2 inventory)
+ *   - [DeviceListScreen] when one or more devices are paired
  *
  * Also hosts the "add another device" pair overlay — a [PairScreen] rendered ON TOP of the
- * tab shell when [BclawNavigation.pairOverlayVisible] is true. Shown via the device switcher
- * drawer's "+ pair device" row. Auto-dismisses when a new device lands in the book.
+ * device list when [BclawNavigation.pairOverlayVisible] is true. Auto-dismisses when a new
+ * device lands in the book.
  */
 @Composable
 fun BclawApp() {
@@ -112,25 +111,6 @@ fun BclawApp() {
                         PairScreen(onDismiss = { navigation.dismissPairOverlay() })
                     }
                 }
-
-                // v2.1 design catalogue overlay. Opened from HomeTab ("v2.1 design catalogue"),
-                // closed via the X in the catalogue header.
-                AnimatedVisibility(
-                    visible = navigation.showcaseOverlayVisible,
-                    enter = fadeIn(animationSpec = tween(motion.durNormal)),
-                    exit = fadeOut(animationSpec = tween(motion.durFast)),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(colors.surfaceBase),
-                    ) {
-                        ShowcaseCatalogScreen(
-                            onDismiss = { navigation.dismissShowcaseOverlay() },
-                        )
-                    }
-                }
             }
 
             AnimatedVisibility(
@@ -145,8 +125,9 @@ fun BclawApp() {
                         .background(Color.Black),
                 ) {
                     remoteOverlay?.let { overlay ->
-                        LiveRemoteSidecar(
-                            bridgeWsUrl = overlay.bridgeWsUrl,
+                        LiveRemoteOverlay(
+                            hostApiBaseUrl = overlay.hostApiBaseUrl,
+                            hostAgentToken = overlay.hostAgentToken,
                             deviceName = overlay.deviceName,
                             onDismiss = { navigation.dismissRemoteOverlay() },
                         )

@@ -74,39 +74,57 @@ class SunshineVideoStream private constructor(
     }
 
     fun sendMousePosition(x: Int, y: Int, reliable: Boolean = false) {
-        controlSession?.sendMousePosition(x, y, plan.width, plan.height, reliable)
+        sendControlInput("mouse position") {
+            sendMousePosition(x, y, plan.width, plan.height, reliable)
+        }
     }
 
     fun sendMouseMove(deltaX: Int, deltaY: Int) {
-        controlSession?.sendMouseMove(deltaX, deltaY)
+        sendControlInput("mouse move") {
+            sendMouseMove(deltaX, deltaY)
+        }
     }
 
     fun sendMouseScroll(scrollAmount: Int) {
-        controlSession?.sendMouseScroll(scrollAmount)
+        sendControlInput("mouse scroll") {
+            sendMouseScroll(scrollAmount)
+        }
     }
 
     fun sendMouseHScroll(scrollAmount: Int) {
-        controlSession?.sendMouseHScroll(scrollAmount)
+        sendControlInput("mouse horizontal scroll") {
+            sendMouseHScroll(scrollAmount)
+        }
     }
 
     fun sendMouseButton(pressed: Boolean, button: Int = SunshineMouseButton.LEFT) {
-        controlSession?.sendMouseButton(pressed, button)
+        sendControlInput("mouse button") {
+            sendMouseButton(pressed, button)
+        }
     }
 
     fun sendKeyboardKey(pressed: Boolean, keyCode: Int, modifiers: Int = SunshineModifier.NONE) {
-        controlSession?.sendKeyboardKey(pressed, keyCode, modifiers)
+        sendControlInput("keyboard key") {
+            sendKeyboardKey(pressed, keyCode, modifiers)
+        }
     }
 
     fun sendKeyboardShortcut(modifierKeyCode: Int, keyCode: Int) {
-        controlSession?.sendKeyboardShortcut(modifierKeyCode, keyCode)
+        sendControlInput("keyboard shortcut") {
+            sendKeyboardShortcut(modifierKeyCode, keyCode)
+        }
     }
 
     fun sendKeyboardChord(keyCode: Int, modifiers: Int = SunshineModifier.NONE) {
-        controlSession?.sendKeyboardChord(keyCode, modifiers)
+        sendControlInput("keyboard chord") {
+            sendKeyboardChord(keyCode, modifiers)
+        }
     }
 
     fun sendUtf8Text(text: String) {
-        controlSession?.sendUtf8Text(text)
+        sendControlInput("utf8 text") {
+            sendUtf8Text(text)
+        }
     }
 
     fun sendTouchEvent(
@@ -119,16 +137,34 @@ class SunshineVideoStream private constructor(
         contactAreaMinor: Float = 0f,
         rotation: Int = 0xFFFF,
     ): Boolean =
-        controlSession?.sendTouchEvent(
-            eventType = eventType,
-            pointerId = pointerId,
-            x = x,
-            y = y,
-            pressureOrDistance = pressureOrDistance,
-            contactAreaMajor = contactAreaMajor,
-            contactAreaMinor = contactAreaMinor,
-            rotation = rotation,
-        ) ?: false
+        callControlInput("touch event", false) {
+            sendTouchEvent(
+                eventType = eventType,
+                pointerId = pointerId,
+                x = x,
+                y = y,
+                pressureOrDistance = pressureOrDistance,
+                contactAreaMajor = contactAreaMajor,
+                contactAreaMinor = contactAreaMinor,
+                rotation = rotation,
+            )
+        }
+
+    private fun sendControlInput(label: String, block: SunshineControlSession.() -> Unit) {
+        callControlInput(label, Unit, block)
+    }
+
+    private fun <T> callControlInput(label: String, fallback: T, block: SunshineControlSession.() -> T): T {
+        val control = controlSession ?: return fallback
+        return runCatching {
+            control.block()
+        }.getOrElse { error ->
+            if (!closed.get()) {
+                Log.w(TAG, "failed to send Sunshine control input: $label", error)
+            }
+            fallback
+        }
+    }
 
     private fun runStream() {
         var stats = SunshineStreamStats(

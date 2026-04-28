@@ -44,11 +44,11 @@ data class BclawTypography(
 
     // Headings
     val h1: TextStyle,            // fs-24 · section titles
-    val h2: TextStyle,            // fs-20 · pivot tabs / sheet titles
-    val h3: TextStyle,            // fs-17 · card titles, message text on session tab
+    val h2: TextStyle,            // fs-20 · sheet titles / primary panels
+    val h3: TextStyle,            // fs-17 · card titles / dense panel headings
 
     // Body
-    val bodyLarge: TextStyle,     // fs-15 · message body
+    val bodyLarge: TextStyle,     // fs-15 · prominent body text
     val body: TextStyle,          // fs-13 · default UI label
     val bodySmall: TextStyle,     // fs-12 · helper text, dense lists
 

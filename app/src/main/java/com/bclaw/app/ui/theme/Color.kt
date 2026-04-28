@@ -35,7 +35,6 @@ val MetroMagenta = Color(0xFFE3008C)
 val MetroLime    = Color(0xFFA4C400)
 val MetroOrange  = Color(0xFFF0A30A)
 val MetroRed     = Color(0xFFE51400)
-val MetroViolet  = Color(0xFF7B5CF5)
 
 /**
  * Semantic color set for one theme. Instantiated twice (light + dark) and selected at runtime.
@@ -43,7 +42,7 @@ val MetroViolet  = Color(0xFF7B5CF5)
  * Token naming mirrors CSS custom properties in `design/tokens.css`:
  *   --surface-base     → surfaceBase
  *   --ink-primary      → inkPrimary
- *   --role-agent-1     → roleAgent1
+ *   --role-support     → roleSupport
  *   etc.
  */
 data class BclawColors(
@@ -72,15 +71,11 @@ data class BclawColors(
     val accentInk: Color,
     val accentSoft: Color,
 
-    // Roles (status + agent identity)
+    // Roles (status + support)
     val roleLive: Color,     // success / live
     val roleWarn: Color,     // warning / reconnecting
     val roleError: Color,    // error / offline
-    val roleAgentCodex: Color,    // cyan
-    val roleAgentClaude: Color,   // magenta
-    val roleAgentGemini: Color,   // orange
-    val roleAgentKimi: Color,     // violet
-    val roleAgentReserved: Color, // lime (5th slot)
+    val roleSupport: Color,  // secondary support accent
 
     // Diff
     val diffAdd: Color,
@@ -122,11 +117,7 @@ val LightBclawColors = BclawColors(
     roleLive = MetroLime,
     roleWarn = MetroOrange,
     roleError = MetroRed,
-    roleAgentCodex = MetroCyan,
-    roleAgentClaude = MetroMagenta,
-    roleAgentGemini = MetroOrange,
-    roleAgentKimi = MetroViolet,
-    roleAgentReserved = MetroLime,
+    roleSupport = MetroMagenta,
 
     // Diff (light)
     diffAdd = Color(0xFF2A7A2A),
@@ -167,11 +158,7 @@ val DarkBclawColors = BclawColors(
     roleLive = MetroLime,
     roleWarn = MetroOrange,
     roleError = MetroRed,
-    roleAgentCodex = MetroCyan,
-    roleAgentClaude = MetroMagenta,
-    roleAgentGemini = MetroOrange,
-    roleAgentKimi = MetroViolet,
-    roleAgentReserved = MetroLime,
+    roleSupport = MetroMagenta,
 
     // Diff (dark) — soft-tinted backgrounds + brighter additions
     diffAdd = MetroLime,

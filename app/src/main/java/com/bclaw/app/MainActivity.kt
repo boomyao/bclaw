@@ -31,9 +31,8 @@ import com.bclaw.app.ui.theme.ThemeMode
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Edge-to-edge so the system does not resize the window when the IME opens —
-        // imePadding() in SessionTab owns the lift. Otherwise both fire and the composer
-        // floats IME-height above the keyboard.
+        // Edge-to-edge so the remote desktop surface can own its keyboard and system-bar
+        // layout without the Activity resizing underneath it.
         enableEdgeToEdge()
         setContent {
             val app = application as BclawApplication

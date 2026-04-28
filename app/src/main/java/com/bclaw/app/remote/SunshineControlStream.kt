@@ -22,6 +22,7 @@ internal class SunshineControlSession private constructor(
 ) : Closeable {
     private val closed = AtomicBoolean(false)
     private val sequence = AtomicInteger(0)
+    private val nativeLock = Any()
     private val touchInputSupported = (hostFeatureFlags and SUNSHINE_FEATURE_PEN_TOUCH_EVENTS) != 0
 
     fun start() {
@@ -146,7 +147,9 @@ internal class SunshineControlSession private constructor(
     }
 
     fun service(timeoutMs: Int): Int =
-        if (closed.get()) 0 else NativeEnet.nativeService(handle, timeoutMs)
+        synchronized(nativeLock) {
+            if (closed.get()) 0 else NativeEnet.nativeService(handle, timeoutMs)
+        }
 
     private fun sendInputPacket(
         packet: ByteArray,
@@ -227,15 +230,19 @@ internal class SunshineControlSession private constructor(
     }
 
     private fun sendPacket(packet: ByteArray, channelId: Int, reliable: Boolean) {
-        if (closed.get()) return
-        if (!NativeEnet.nativeSend(handle, packet, channelId, reliable, unsequenced = false)) {
-            throw IOException("failed to send ENet control packet")
+        synchronized(nativeLock) {
+            if (closed.get()) return
+            if (!NativeEnet.nativeSend(handle, packet, channelId, reliable, unsequenced = false)) {
+                throw IOException("failed to send ENet control packet")
+            }
         }
     }
 
     override fun close() {
-        if (closed.compareAndSet(false, true)) {
-            NativeEnet.nativeClose(handle)
+        synchronized(nativeLock) {
+            if (closed.compareAndSet(false, true)) {
+                NativeEnet.nativeClose(handle)
+            }
         }
     }
 

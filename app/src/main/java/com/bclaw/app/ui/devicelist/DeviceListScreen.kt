@@ -56,7 +56,8 @@ fun DeviceListScreen() {
                                 device = device,
                                 onClick = {
                                     navigation.requestRemoteOverlay(
-                                        bridgeWsUrl = device.wsBaseUrl,
+                                        hostApiBaseUrl = device.hostApiBaseUrl,
+                                        hostAgentToken = device.token,
                                         deviceName = device.displayName,
                                     )
                                 },
@@ -101,7 +102,7 @@ private fun DeviceRow(device: Device, onClick: () -> Unit) {
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            text = device.wsBaseUrl,
+            text = device.hostApiBaseUrl,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,

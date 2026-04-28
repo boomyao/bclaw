@@ -15,8 +15,8 @@ import androidx.compose.runtime.staticCompositionLocalOf
 data class BclawMotion(
     // Durations (ms)
     val durFast: Int = 120,       // hover/press tints, icon flips, small value commits
-    val durNormal: Int = 200,     // tab slides, message cards entering, chips opening
-    val durSlow: Int = 320,       // sheets, pickers, device switcher
+    val durNormal: Int = 200,     // panels entering, chips opening
+    val durSlow: Int = 320,       // sheets, pickers, device list transitions
 
     // Easings
     val easeStandard: Easing = StandardEase,   // fast out, slow in — default for all UI
@@ -29,7 +29,7 @@ data class BclawMotion(
     val loadingDotsLoop: Int = 1200,     // ms · 3-dot loading cycle
     val loadingDotsStagger: Int = 150,   // ms between each dot in loading cycle
     val runningStripLoop: Int = 1800,    // ms · 5-dot metro progress bar
-    val runningStripStagger: Int = 360,  // ms between each dot in running strip
+    val runningStripStagger: Int = 360,  // ms between each dot in progress strip
 )
 
 // Keep these as `val` at file scope so they can also be referenced from data-class defaults.

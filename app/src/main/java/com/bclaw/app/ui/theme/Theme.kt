@@ -62,7 +62,7 @@ fun BclawTheme(
 private fun materialDarkScheme(c: BclawColors) = darkColorScheme(
     primary = c.accent,
     onPrimary = c.accentInk,
-    secondary = c.roleAgentClaude,
+    secondary = c.roleSupport,
     onSecondary = c.surfaceBase,
     tertiary = c.inkTertiary,
     onTertiary = c.surfaceBase,
@@ -83,7 +83,7 @@ private fun materialDarkScheme(c: BclawColors) = darkColorScheme(
 private fun materialLightScheme(c: BclawColors) = lightColorScheme(
     primary = c.accent,
     onPrimary = c.accentInk,
-    secondary = c.roleAgentClaude,
+    secondary = c.roleSupport,
     onSecondary = c.surfaceBase,
     tertiary = c.inkTertiary,
     onTertiary = c.surfaceBase,

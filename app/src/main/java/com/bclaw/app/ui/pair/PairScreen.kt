@@ -120,7 +120,7 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
 
         // Body copy
         Text(
-            text = "Run `bclaw-handoff --qr` on your Mac, then scan the code it shows — or paste the url below.",
+            text = "Run `scripts/bclaw-handoff --qr` on your Mac, then scan the code it shows — or paste the url below.",
             style = type.bodyLarge,
             color = colors.inkSecondary,
         )
@@ -190,7 +190,7 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
                 )
                 Spacer(Modifier.height(sp.sp1))
                 Text(
-                    text = "run bclaw-handoff --qr to print one",
+                    text = "run scripts/bclaw-handoff --qr to print one",
                     style = type.bodySmall,
                     color = colors.inkTertiary,
                 )
@@ -227,7 +227,7 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
             value = urlInput,
             onValueChange = { urlInput = it },
             label = "bclaw2 url",
-            placeholder = "bclaw2://100.64.1.2:8766?tok=…&agent=codex",
+            placeholder = "bclaw2://100.64.1.2:8766?tok=…",
             helpMessage = null,
             errorMessage = pairError?.let { pairErrorMessage(it) },
             mono = true,

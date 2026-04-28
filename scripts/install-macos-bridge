@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+printf '[bclaw-install] warning: install-macos-bridge is deprecated; use install-macos-host-agent\n' >&2
+exec "${SCRIPT_DIR}/install-macos-host-agent" "$@"

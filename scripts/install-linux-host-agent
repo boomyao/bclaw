@@ -1,0 +1,392 @@
+#!/usr/bin/env bash
+# Install bclaw's Linux host-agent runtime for beta users.
+#
+# This script targets Ubuntu desktop/server first. It installs the host agent as
+# a per-user systemd service so the user only has one bclaw service to manage.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+HOST_AGENT_DIR="${REPO_DIR}/host-agent"
+
+LABEL="${BCLAW_SYSTEMD_LABEL:-dev.bclaw.host-agent}"
+PORT="${PORT:-8766}"
+TOKEN_FILE="${BCLAW_TOKEN_FILE:-${HOME}/.bclaw/host-agent.token}"
+LEGACY_TOKEN_FILE="${HOME}/.bclaw/ws.token"
+START_SUNSHINE="${BCLAW_START_SUNSHINE:-1}"
+INSTALL_SUNSHINE="${BCLAW_INSTALL_SUNSHINE:-1}"
+INSTALL_NODESOURCE="${BCLAW_INSTALL_NODESOURCE:-1}"
+ENABLE_LINGER="${BCLAW_ENABLE_LINGER:-0}"
+SUNSHINE_DEB_URL="${BCLAW_SUNSHINE_DEB_URL:-}"
+SUNSHINE_API_URL="${BCLAW_SUNSHINE_API_URL:-}"
+SUNSHINE_AUTH="${BCLAW_SUNSHINE_AUTH:-}"
+SUNSHINE_USER="${BCLAW_SUNSHINE_USER:-}"
+SUNSHINE_PASSWORD="${BCLAW_SUNSHINE_PASSWORD:-}"
+SUNSHINE_TLS_VERIFY="${BCLAW_SUNSHINE_TLS_VERIFY:-}"
+SUNSHINE_CONFIG="${BCLAW_SUNSHINE_CONFIG:-}"
+SUNSHINE_LOG="${BCLAW_SUNSHINE_LOG:-}"
+SUNSHINE_PREPARE_CMD="${BCLAW_SUNSHINE_PREPARE_CMD:-}"
+SUNSHINE_CLOSE_CMD="${BCLAW_SUNSHINE_CLOSE_CMD:-}"
+SUNSHINE_STREAM_HOST="${BCLAW_SUNSHINE_STREAM_HOST:-}"
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bclaw"
+SERVICE_PATH="${SYSTEMD_USER_DIR}/${LABEL}.service"
+
+usage() {
+  cat >&2 <<USAGE
+usage: scripts/install-linux-host-agent [--port <port>] [--no-sunshine-start] [--no-sunshine-install] [--enable-linger]
+
+Environment overrides:
+  PORT                         Host-agent port (default: 8766)
+  BCLAW_TOKEN_FILE=<path>      Pairing token file (default: ~/.bclaw/host-agent.token)
+  BCLAW_SYSTEMD_LABEL=<name>   systemd user service name (default: dev.bclaw.host-agent)
+  BCLAW_SUNSHINE_DEB_URL=<url> Sunshine .deb URL override
+  BCLAW_INSTALL_SUNSHINE=0     Do not install Sunshine automatically
+  BCLAW_START_SUNSHINE=0       Do not start Sunshine after install
+  BCLAW_SUNSHINE_API_URL=<url> Sunshine Web UI/API URL (default in agent: https://127.0.0.1:47990)
+  BCLAW_SUNSHINE_AUTH=<value>  Sunshine Authorization header value, e.g. "Basic ..."
+  BCLAW_SUNSHINE_USER=<name>   Sunshine Web UI username for Basic auth
+  BCLAW_SUNSHINE_PASSWORD=<pw> Sunshine Web UI password for Basic auth
+  BCLAW_INSTALL_NODESOURCE=0   Do not use NodeSource when apt Node.js is too old
+  BCLAW_ENABLE_LINGER=1        Enable systemd user service outside login sessions
+USAGE
+  exit "${1:-1}"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --port)
+      [ "$#" -ge 2 ] || usage
+      PORT="$2"
+      shift 2
+      ;;
+    --no-sunshine-start)
+      START_SUNSHINE=0
+      shift 1
+      ;;
+    --no-sunshine-install)
+      INSTALL_SUNSHINE=0
+      shift 1
+      ;;
+    --enable-linger)
+      ENABLE_LINGER=1
+      shift 1
+      ;;
+    -h|--help)
+      usage 0
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+log() {
+  printf '[bclaw-install] %s\n' "$*" >&2
+}
+
+warn() {
+  printf '[bclaw-install] warning: %s\n' "$*" >&2
+}
+
+fail() {
+  printf '[bclaw-install] error: %s\n' "$*" >&2
+  exit 1
+}
+
+systemd_escape() {
+  printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g' \
+    -e 's/%/%%/g'
+}
+
+sudo_cmd() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    command -v sudo >/dev/null 2>&1 || fail "sudo is required to install system packages"
+    sudo "$@"
+  fi
+}
+
+apt_updated=0
+apt_update_once() {
+  [ "$apt_updated" = "1" ] && return
+  sudo_cmd apt-get update
+  apt_updated=1
+}
+
+node_major() {
+  node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0'
+}
+
+require_linux() {
+  [ "$(uname -s)" = "Linux" ] || fail "this installer currently targets Linux"
+  [ -f "${HOST_AGENT_DIR}/package.json" ] || fail "host-agent/package.json not found at ${HOST_AGENT_DIR}"
+  command -v systemctl >/dev/null 2>&1 || fail "systemd is required for the Linux host-agent service"
+  command -v apt-get >/dev/null 2>&1 || fail "this beta installer requires apt-get; use BCLAW_SUNSHINE_DEB_URL for manual package choice"
+}
+
+ensure_base_packages() {
+  log "Installing base packages"
+  apt_update_once
+  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ca-certificates \
+    curl \
+    gnupg \
+    openssl \
+    build-essential
+}
+
+ensure_node() {
+  local major
+  major="$(node_major)"
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$major" -ge 18 ]; then
+    log "Node found: $(node --version)"
+    return
+  fi
+
+  log "Installing Node.js with apt"
+  apt_update_once
+  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm || true
+
+  major="$(node_major)"
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$major" -ge 18 ]; then
+    log "Node found: $(node --version)"
+    return
+  fi
+
+  [ "$INSTALL_NODESOURCE" = "1" ] || fail "Node.js 18+ is required; apt provided $(node --version 2>/dev/null || printf 'nothing')"
+  command -v curl >/dev/null 2>&1 || fail "curl is required to install Node.js from NodeSource"
+
+  log "apt Node.js is too old; installing Node.js 20 from NodeSource"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo_cmd bash -
+  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+  major="$(node_major)"
+  [ "$major" -ge 18 ] || fail "Node.js 18+ is required"
+  command -v npm >/dev/null 2>&1 || fail "npm is required"
+  log "Node found: $(node --version)"
+}
+
+install_host_agent_deps() {
+  log "Installing host-agent npm dependencies"
+  if [ -f "${HOST_AGENT_DIR}/package-lock.json" ]; then
+    (cd "$HOST_AGENT_DIR" && npm ci --omit=dev)
+  else
+    (cd "$HOST_AGENT_DIR" && npm install --omit=dev)
+  fi
+}
+
+sunshine_binary() {
+  for candidate in \
+    "$(command -v sunshine 2>/dev/null || true)" \
+    /usr/bin/sunshine \
+    /usr/local/bin/sunshine \
+    /snap/bin/sunshine \
+    /opt/sunshine/sunshine; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+sunshine_deb_url() {
+  if [ -n "$SUNSHINE_DEB_URL" ]; then
+    printf '%s\n' "$SUNSHINE_DEB_URL"
+    return 0
+  fi
+
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  local arch
+  arch="$(dpkg --print-architecture)"
+
+  if [ "${ID:-}" != "ubuntu" ]; then
+    fail "automatic Sunshine install currently supports Ubuntu only; set BCLAW_SUNSHINE_DEB_URL for this distro"
+  fi
+  case "${VERSION_ID:-}" in
+    22.04|24.04)
+      printf 'https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-%s-%s.deb\n' "$VERSION_ID" "$arch"
+      ;;
+    *)
+      fail "automatic Sunshine install supports Ubuntu 22.04/24.04; set BCLAW_SUNSHINE_DEB_URL for ${VERSION_ID:-unknown}"
+      ;;
+  esac
+}
+
+ensure_sunshine() {
+  if sunshine_binary >/dev/null 2>&1; then
+    log "Sunshine found: $(sunshine_binary)"
+    return
+  fi
+
+  [ "$INSTALL_SUNSHINE" = "1" ] || fail "Sunshine is missing and BCLAW_INSTALL_SUNSHINE=0"
+
+  local url deb
+  url="$(sunshine_deb_url)"
+  deb="$(mktemp -t bclaw-sunshine.XXXXXX.deb)"
+
+  log "Downloading Sunshine: ${url}"
+  if ! curl -fL "$url" -o "$deb"; then
+    rm -f "$deb"
+    fail "could not download Sunshine .deb; set BCLAW_SUNSHINE_DEB_URL to override"
+  fi
+  log "Installing Sunshine .deb"
+  apt_update_once
+  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb"
+  rm -f "$deb"
+
+  if ! sunshine_binary >/dev/null 2>&1; then
+    fail "Sunshine install finished, but the expected binary was not found"
+  fi
+}
+
+ensure_token() {
+  mkdir -p "$(dirname "$TOKEN_FILE")"
+  if [ -s "$TOKEN_FILE" ]; then
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    log "Pairing token exists: ${TOKEN_FILE}"
+    return
+  fi
+
+  if [ -s "$LEGACY_TOKEN_FILE" ]; then
+    log "Migrating legacy pairing token: ${LEGACY_TOKEN_FILE} -> ${TOKEN_FILE}"
+    cp "$LEGACY_TOKEN_FILE" "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    return
+  fi
+
+  log "Creating pairing token: ${TOKEN_FILE}"
+  openssl rand -hex 32 > "$TOKEN_FILE"
+  chmod 600 "$TOKEN_FILE"
+}
+
+install_systemd_user_service() {
+  mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR"
+
+  local escaped_token_file escaped_sunshine_api_url escaped_sunshine_auth escaped_sunshine_user escaped_sunshine_password
+  local escaped_sunshine_tls_verify escaped_sunshine_config escaped_sunshine_log
+  local escaped_sunshine_prepare_cmd escaped_sunshine_close_cmd escaped_sunshine_stream_host
+  escaped_token_file="$(systemd_escape "$TOKEN_FILE")"
+  escaped_sunshine_api_url="$(systemd_escape "$SUNSHINE_API_URL")"
+  escaped_sunshine_auth="$(systemd_escape "$SUNSHINE_AUTH")"
+  escaped_sunshine_user="$(systemd_escape "$SUNSHINE_USER")"
+  escaped_sunshine_password="$(systemd_escape "$SUNSHINE_PASSWORD")"
+  escaped_sunshine_tls_verify="$(systemd_escape "$SUNSHINE_TLS_VERIFY")"
+  escaped_sunshine_config="$(systemd_escape "$SUNSHINE_CONFIG")"
+  escaped_sunshine_log="$(systemd_escape "$SUNSHINE_LOG")"
+  escaped_sunshine_prepare_cmd="$(systemd_escape "$SUNSHINE_PREPARE_CMD")"
+  escaped_sunshine_close_cmd="$(systemd_escape "$SUNSHINE_CLOSE_CMD")"
+  escaped_sunshine_stream_host="$(systemd_escape "$SUNSHINE_STREAM_HOST")"
+
+  log "Writing systemd user service: ${SERVICE_PATH}"
+  cat > "$SERVICE_PATH" <<SERVICE
+[Unit]
+Description=bclaw host agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${HOST_AGENT_DIR}
+Environment=PORT=${PORT}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin
+Environment="BCLAW_TOKEN_FILE=${escaped_token_file}"
+Environment="BCLAW_SUNSHINE_API_URL=${escaped_sunshine_api_url}"
+Environment="BCLAW_SUNSHINE_AUTH=${escaped_sunshine_auth}"
+Environment="BCLAW_SUNSHINE_USER=${escaped_sunshine_user}"
+Environment="BCLAW_SUNSHINE_PASSWORD=${escaped_sunshine_password}"
+Environment="BCLAW_SUNSHINE_TLS_VERIFY=${escaped_sunshine_tls_verify}"
+Environment="BCLAW_SUNSHINE_CONFIG=${escaped_sunshine_config}"
+Environment="BCLAW_SUNSHINE_LOG=${escaped_sunshine_log}"
+Environment="BCLAW_SUNSHINE_PREPARE_CMD=${escaped_sunshine_prepare_cmd}"
+Environment="BCLAW_SUNSHINE_CLOSE_CMD=${escaped_sunshine_close_cmd}"
+Environment="BCLAW_SUNSHINE_STREAM_HOST=${escaped_sunshine_stream_host}"
+ExecStart=/usr/bin/env bash -lc 'exec ./start.sh'
+Restart=always
+RestartSec=2
+StandardOutput=append:${STATE_DIR}/host-agent.out.log
+StandardError=append:${STATE_DIR}/host-agent.err.log
+
+[Install]
+WantedBy=default.target
+SERVICE
+
+  if [ "$ENABLE_LINGER" = "1" ] && command -v loginctl >/dev/null 2>&1; then
+    local user_name
+    user_name="${USER:-$(id -un)}"
+    log "Enabling linger for user ${user_name}"
+    sudo_cmd loginctl enable-linger "$user_name" || warn "could not enable linger"
+  fi
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$LABEL"
+}
+
+start_sunshine_once() {
+  [ "$START_SUNSHINE" = "1" ] || return 0
+
+  local sunshine
+  sunshine="$(sunshine_binary 2>/dev/null || true)"
+  [ -n "$sunshine" ] || return 0
+
+  if pgrep -u "$(id -u)" -x sunshine >/dev/null 2>&1; then
+    log "Sunshine is already running"
+    return
+  fi
+
+  log "Starting Sunshine once"
+  if systemctl --user list-unit-files sunshine.service >/dev/null 2>&1; then
+    systemctl --user start sunshine.service >/dev/null 2>&1 || true
+  fi
+  if ! pgrep -u "$(id -u)" -x sunshine >/dev/null 2>&1; then
+    nohup "$sunshine" > "${STATE_DIR}/sunshine.out.log" 2> "${STATE_DIR}/sunshine.err.log" &
+  fi
+}
+
+wait_for_host_agent() {
+  local url="http://127.0.0.1:${PORT}/v1/host/capabilities"
+  local token
+  token="$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fsS -H "Authorization: Bearer ${token}" "$url" >/dev/null 2>&1; then
+      log "Host agent is running: ${url}"
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  warn "Host agent did not answer ${url}; check ${STATE_DIR}/host-agent.err.log"
+  return 1
+}
+
+main() {
+  require_linux
+  ensure_base_packages
+  ensure_node
+  install_host_agent_deps
+  ensure_sunshine
+  ensure_token
+  install_systemd_user_service
+  start_sunshine_once
+  wait_for_host_agent || true
+
+  cat >&2 <<DONE
+
+bclaw host-agent install complete.
+
+Pairing:
+  ${REPO_DIR}/scripts/bclaw-handoff --qr
+
+Service:
+  systemd user service: ${LABEL}
+  logs: ${STATE_DIR}/host-agent.out.log and ${STATE_DIR}/host-agent.err.log
+
+DONE
+}
+
+main "$@"
