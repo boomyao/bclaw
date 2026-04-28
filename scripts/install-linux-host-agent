@@ -32,6 +32,7 @@ SUNSHINE_STREAM_HOST="${BCLAW_SUNSHINE_STREAM_HOST:-}"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/bclaw"
 SERVICE_PATH="${SYSTEMD_USER_DIR}/${LABEL}.service"
+NODE_BIN_DIR=""
 
 usage() {
   cat >&2 <<USAGE
@@ -122,6 +123,31 @@ node_major() {
   node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0'
 }
 
+find_node_path() {
+  for candidate in \
+    "$(command -v node 2>/dev/null || true)" \
+    "${NVM_DIR:-${HOME}/.nvm}"/versions/node/*/bin/node \
+    "${HOME}/.volta/bin/node" \
+    "${HOME}/.local/bin/node"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+use_node_path_if_available() {
+  local node_path
+  node_path="$(find_node_path 2>/dev/null || true)"
+  [ -n "$node_path" ] || return 1
+  NODE_BIN_DIR="$(dirname "$node_path")"
+  case ":${PATH}:" in
+    *":${NODE_BIN_DIR}:"*) ;;
+    *) export PATH="${NODE_BIN_DIR}:${PATH}" ;;
+  esac
+}
+
 require_linux() {
   [ "$(uname -s)" = "Linux" ] || fail "this installer currently targets Linux"
   [ -f "${HOST_AGENT_DIR}/package.json" ] || fail "host-agent/package.json not found at ${HOST_AGENT_DIR}"
@@ -142,6 +168,7 @@ ensure_base_packages() {
 
 ensure_node() {
   local major
+  use_node_path_if_available || true
   major="$(node_major)"
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$major" -ge 18 ]; then
     log "Node found: $(node --version)"
@@ -152,6 +179,7 @@ ensure_node() {
   apt_update_once
   sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm || true
 
+  use_node_path_if_available || true
   major="$(node_major)"
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [ "$major" -ge 18 ]; then
     log "Node found: $(node --version)"
@@ -165,6 +193,7 @@ ensure_node() {
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo_cmd bash -
   sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
 
+  use_node_path_if_available || true
   major="$(node_major)"
   [ "$major" -ge 18 ] || fail "Node.js 18+ is required"
   command -v npm >/dev/null 2>&1 || fail "npm is required"
@@ -274,10 +303,15 @@ ensure_token() {
 install_systemd_user_service() {
   mkdir -p "$SYSTEMD_USER_DIR" "$STATE_DIR"
 
-  local escaped_token_file escaped_sunshine_api_url escaped_sunshine_auth escaped_sunshine_user escaped_sunshine_password
+  local escaped_token_file escaped_service_path escaped_sunshine_api_url escaped_sunshine_auth escaped_sunshine_user escaped_sunshine_password
   local escaped_sunshine_tls_verify escaped_sunshine_config escaped_sunshine_log
   local escaped_sunshine_prepare_cmd escaped_sunshine_close_cmd escaped_sunshine_stream_host
   escaped_token_file="$(systemd_escape "$TOKEN_FILE")"
+  local service_path="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin"
+  if [ -n "$NODE_BIN_DIR" ]; then
+    service_path="${NODE_BIN_DIR}:${service_path}"
+  fi
+  escaped_service_path="$(systemd_escape "$service_path")"
   escaped_sunshine_api_url="$(systemd_escape "$SUNSHINE_API_URL")"
   escaped_sunshine_auth="$(systemd_escape "$SUNSHINE_AUTH")"
   escaped_sunshine_user="$(systemd_escape "$SUNSHINE_USER")"
@@ -300,7 +334,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=${HOST_AGENT_DIR}
 Environment=PORT=${PORT}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin
+Environment=PATH=${escaped_service_path}
 Environment="BCLAW_TOKEN_FILE=${escaped_token_file}"
 Environment="BCLAW_SUNSHINE_API_URL=${escaped_sunshine_api_url}"
 Environment="BCLAW_SUNSHINE_AUTH=${escaped_sunshine_auth}"
