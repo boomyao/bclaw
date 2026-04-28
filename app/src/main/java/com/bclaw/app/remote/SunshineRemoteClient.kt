@@ -789,10 +789,10 @@ private fun parseSunshineStatus(json: JSONObject): SunshineStatus {
     val display = json.optJSONObject("display")
     val wake = json.optJSONObject("wake")
     val displays = parseSunshineDisplays(display)
-    val reportedSelectedDisplayId = display?.optString("selectedId")?.takeIf { it.isNotBlank() }
-        ?: stream?.optString("displayId")?.takeIf { it.isNotBlank() }
-    val reportedSelectedDisplayName = display?.optString("selectedName")?.takeIf { it.isNotBlank() }
-        ?: stream?.optString("displayName")?.takeIf { it.isNotBlank() }
+    val reportedSelectedDisplayId = display?.optString("selectedId").takeIfMeaningful()
+        ?: stream?.optString("displayId").takeIfMeaningful()
+    val reportedSelectedDisplayName = display?.optString("selectedName").takeIfMeaningful()
+        ?: stream?.optString("displayName").takeIfMeaningful()
     val selectedDisplay = displays.firstOrNull { it.id == reportedSelectedDisplayId && it.connected }
         ?: displays.firstOrNull { it.id == reportedSelectedDisplayId }
         ?: displays.firstOrNull { it.connected }
@@ -842,10 +842,10 @@ private fun parseSunshineLaunchPlan(raw: String): SunshineLaunchPlan {
         rtspSessionUrl = launch?.optString("sessionUrl")?.takeIf { it.isNotBlank() }
             ?: launchParsed?.optString("sessionUrl0")?.takeIf { it.isNotBlank() },
         streamHosts = stream.optStringArray("hosts"),
-        displayId = stream?.optString("displayId")?.takeIf { it.isNotBlank() }
-            ?: json.optJSONObject("display")?.optString("selectedId")?.takeIf { it.isNotBlank() },
-        displayName = stream?.optString("displayName")?.takeIf { it.isNotBlank() }
-            ?: json.optJSONObject("display")?.optString("selectedName")?.takeIf { it.isNotBlank() },
+        displayId = stream?.optString("displayId").takeIfMeaningful()
+            ?: json.optJSONObject("display")?.optString("selectedId").takeIfMeaningful(),
+        displayName = stream?.optString("displayName").takeIfMeaningful()
+            ?: json.optJSONObject("display")?.optString("selectedName").takeIfMeaningful(),
         riKey = gameStream?.optString("riKey")?.takeIf { it.isNotBlank() }
             ?: gameStream?.optJSONObject("launchQuery")?.optString("rikey")?.takeIf { it.isNotBlank() },
         riKeyId = if (gameStream?.has("riKeyId") == true) {
@@ -913,6 +913,15 @@ private fun JSONObject?.optStringArray(name: String): List<String> {
         for (index in 0 until array.length()) {
             array.optString(index).takeIf { it.isNotBlank() }?.let(::add)
         }
+    }
+}
+
+private fun String?.takeIfMeaningful(): String? {
+    val value = this?.trim() ?: return null
+    return value.takeIf {
+        it.isNotEmpty() &&
+            !it.equals("null", ignoreCase = true) &&
+            !it.equals("undefined", ignoreCase = true)
     }
 }
 

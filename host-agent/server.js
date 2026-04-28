@@ -512,7 +512,7 @@ function mergeSunshineDisplaySources(logDisplays, systemDisplays) {
 
 function readSunshineDisplayState() {
   const config = readSunshineConfigFile();
-  const explicitSelectedId = String(config.output_name || "").trim();
+  const explicitSelectedId = normalizeSunshineDisplayId(config.output_name);
   const logState = readSunshineDisplayLogState();
   const systemDisplays = readMacSystemDisplays();
   const displaySource = systemDisplays.length > 0
@@ -559,6 +559,14 @@ function readSunshineDisplayState() {
     logPath: SUNSHINE_LOG_PATH,
     displays,
   };
+}
+
+function normalizeSunshineDisplayId(value) {
+  const displayId = String(value || "").trim();
+  if (!displayId || displayId.toLowerCase() === "null" || displayId.toLowerCase() === "undefined") {
+    return "";
+  }
+  return displayId;
 }
 
 function ipv4ToInt(address) {
@@ -842,7 +850,7 @@ async function handleSunshineDisplays(response) {
 }
 
 function normalizeDisplaySelection(body) {
-  const displayId = String(body.displayId || body.outputName || body.id || "").trim();
+  const displayId = normalizeSunshineDisplayId(body.displayId || body.outputName || body.id);
   if (!displayId) {
     throw Object.assign(new Error("displayId is required"), { httpStatus: 400 });
   }

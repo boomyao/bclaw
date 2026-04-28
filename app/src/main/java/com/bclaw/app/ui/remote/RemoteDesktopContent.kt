@@ -2651,16 +2651,21 @@ private fun resolveUsableDisplayId(
     status: SunshineStatus?,
 ): String? {
     val displays = status?.displays.orEmpty()
+    fun String?.validDisplayId(): String? =
+        this
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.takeUnless { it.equals("null", ignoreCase = true) || it.equals("undefined", ignoreCase = true) }
     fun String?.connectedDisplayId(): String? =
-        this?.takeIf { id -> displays.any { it.id == id && it.connected } }
+        validDisplayId()?.takeIf { id -> displays.any { it.id == id && it.connected } }
     fun String?.knownDisplayId(): String? =
-        this?.takeIf { id -> displays.any { it.id == id } }
+        validDisplayId()?.takeIf { id -> displays.any { it.id == id } }
 
     return preferredDisplayId.connectedDisplayId()
         ?: status?.selectedDisplayId.connectedDisplayId()
         ?: displays.firstOrNull { it.connected }?.id
         ?: preferredDisplayId.knownDisplayId()
         ?: status?.selectedDisplayId.knownDisplayId()
-        ?: preferredDisplayId
-        ?: status?.selectedDisplayId
+        ?: preferredDisplayId.validDisplayId()
+        ?: status?.selectedDisplayId.validDisplayId()
 }
