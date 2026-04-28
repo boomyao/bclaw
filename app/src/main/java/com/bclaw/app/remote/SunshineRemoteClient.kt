@@ -22,6 +22,11 @@ private val RemoteHttpClient = OkHttpClient.Builder()
     .readTimeout(12, TimeUnit.SECONDS)
     .build()
 
+private val RemoteSessionHttpClient = RemoteHttpClient.newBuilder()
+    .readTimeout(35, TimeUnit.SECONDS)
+    .callTimeout(40, TimeUnit.SECONDS)
+    .build()
+
 private val RemoteAiInputHttpClient = RemoteHttpClient.newBuilder()
     .readTimeout(70, TimeUnit.SECONDS)
     .callTimeout(75, TimeUnit.SECONDS)
@@ -251,7 +256,7 @@ suspend fun startSunshineSession(
         .hostAgentAuth(token)
         .post(body)
         .build()
-    RemoteHttpClient.newCall(httpRequest).execute().use { response ->
+    RemoteSessionHttpClient.newCall(httpRequest).execute().use { response ->
         val raw = response.body?.string().orEmpty()
         if (!response.isSuccessful) {
             throw IOException(raw.ifBlank { "HTTP ${response.code}" })

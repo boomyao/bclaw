@@ -50,9 +50,10 @@ class BclawV2Controller(
 
     fun onIntent(intent: BclawV2Intent) {
         when (intent) {
-            is BclawV2Intent.PairNewDevice -> pairNewDevice(intent.rawUrl)
+            is BclawV2Intent.PairNewDevice -> pairNewDevice(intent.rawUrl, intent.displayName)
             is BclawV2Intent.SwitchDevice -> switchDevice(intent.id)
             is BclawV2Intent.RemoveDevice -> removeDevice(intent.id)
+            is BclawV2Intent.RenameDevice -> renameDevice(intent.id, intent.displayName)
         }
     }
 
@@ -64,18 +65,24 @@ class BclawV2Controller(
         supervisor.cancel()
     }
 
-    private fun pairNewDevice(rawUrl: String) {
+    private fun pairNewDevice(rawUrl: String, displayName: String?) {
         when (val parsed = BclawV2UrlParser.parse(rawUrl)) {
             is BclawV2UrlParseResult.Error -> _pairError.value = parsed
             is BclawV2UrlParseResult.Success -> {
                 _pairError.value = null
                 scope.launch {
+                    val existing = uiState.value.deviceBook.devices.firstOrNull {
+                        it.hostApiBaseUrl == parsed.hostApiBaseUrl
+                    }
+                    val customName = normalizeDeviceName(displayName)
                     val device = Device(
-                        id = DeviceId.generate(),
-                        displayName = defaultDeviceName(parsed.hostApiBaseUrl),
+                        id = existing?.id ?: DeviceId.generate(),
+                        displayName = customName
+                            ?: existing?.displayName
+                            ?: defaultDeviceName(parsed.hostApiBaseUrl),
                         hostApiBaseUrl = parsed.hostApiBaseUrl,
                         token = parsed.token,
-                        pairedAtEpochMs = System.currentTimeMillis(),
+                        pairedAtEpochMs = existing?.pairedAtEpochMs ?: System.currentTimeMillis(),
                     )
                     deviceBookRepository.upsertDevice(device)
                     deviceBookRepository.setActiveDevice(device.id)
@@ -91,12 +98,21 @@ class BclawV2Controller(
     private fun removeDevice(id: DeviceId) {
         scope.launch { deviceBookRepository.removeDevice(id) }
     }
+
+    private fun renameDevice(id: DeviceId, displayName: String) {
+        val normalized = normalizeDeviceName(displayName) ?: return
+        scope.launch { deviceBookRepository.renameDevice(id, normalized) }
+    }
 }
 
 sealed class BclawV2Intent {
-    data class PairNewDevice(val rawUrl: String) : BclawV2Intent()
+    data class PairNewDevice(
+        val rawUrl: String,
+        val displayName: String? = null,
+    ) : BclawV2Intent()
     data class SwitchDevice(val id: DeviceId) : BclawV2Intent()
     data class RemoveDevice(val id: DeviceId) : BclawV2Intent()
+    data class RenameDevice(val id: DeviceId, val displayName: String) : BclawV2Intent()
 }
 
 data class BclawV2UiState(
@@ -116,3 +132,13 @@ private fun defaultDeviceName(hostApiBaseUrl: String): String {
     val host = hostPort.substringBefore(':').ifBlank { hostPort }
     return host.substringBefore('.')
 }
+
+private fun normalizeDeviceName(displayName: String?): String? {
+    return displayName
+        ?.trim()
+        ?.replace(Regex("\\s+"), " ")
+        ?.take(MAX_DEVICE_NAME_LENGTH)
+        ?.takeIf { it.isNotBlank() }
+}
+
+private const val MAX_DEVICE_NAME_LENGTH = 80

@@ -1644,8 +1644,7 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
                     maxDisplacement < tapSlopPx &&
                     secondaryTapElapsed < TRACKPAD_KEYBOARD_TAP_TIMEOUT_MS
                 ) {
-                    streamInput.sendMouseButton(pressed = true, button = SunshineMouseButton.RIGHT)
-                    streamInput.sendMouseButton(pressed = false, button = SunshineMouseButton.RIGHT)
+                    streamInput.clickMouseButton(SunshineMouseButton.RIGHT)
                     view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 }
                 tombstoneSet = false
@@ -1748,11 +1747,9 @@ private suspend fun PointerInputScope.detectRemoteZoomViewportGestures(
                 //     cursor's tombstone position.
                 val tapSeparation = (secondInitialPos - first.position).getDistance()
                 val isDoubleClick = tapSeparation < doubleClickProximityPx
-                streamInput.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
-                streamInput.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                streamInput.clickMouseButton(SunshineMouseButton.LEFT)
                 if (isDoubleClick) {
-                    streamInput.sendMouseButton(pressed = true, button = SunshineMouseButton.LEFT)
-                    streamInput.sendMouseButton(pressed = false, button = SunshineMouseButton.LEFT)
+                    streamInput.clickMouseButton(SunshineMouseButton.LEFT)
                 }
                 view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
                 tombstoneSet = false
@@ -2188,6 +2185,11 @@ private fun trackpadMouseSensitivity(plan: SunshineLaunchPlan): Float {
 // multiplier ~`fastMult` (reach: long selections without lifting). Linear ramp in
 // between. Multiplied by a screen-resolution factor so high-DPI hosts get more
 // remote-pixel coverage per finger pixel.
+private fun SunshineVideoStream.clickMouseButton(button: Int) {
+    sendMouseButton(pressed = true, button = button)
+    sendMouseButton(pressed = false, button = button)
+}
+
 private fun holdMouseMultiplier(speedPxPerMs: Float, plan: SunshineLaunchPlan): Float {
     val slowSpeed = 0.2f
     val fastSpeed = 2.5f

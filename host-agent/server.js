@@ -513,8 +513,10 @@ function mergeSunshineDisplaySources(logDisplays, systemDisplays) {
 function readSunshineDisplayState() {
   const config = readSunshineConfigFile();
   const explicitSelectedId = normalizeSunshineDisplayId(config.output_name);
-  const logState = readSunshineDisplayLogState();
   const systemDisplays = readMacSystemDisplays();
+  const logState = systemDisplays.length > 0
+    ? parseSunshineDisplayLogText(readTailText(SUNSHINE_LOG_PATH))
+    : readSunshineDisplayLogState();
   const displaySource = systemDisplays.length > 0
     ? (logState.displays.length > 0 ? "system+log" : "system")
     : (logState.displays.length > 0 ? "log" : "none");
@@ -2180,7 +2182,30 @@ async function ensurePairedSunshineClient() {
 }
 
 async function launchGameStreamApp(identity, launchQuery) {
-  const raw = await gameStreamHttpsRequest("launch", launchQuery, identity, { timeoutMs: 30000 });
+  const timeoutMs = clampInt(process.env.BCLAW_GAMESTREAM_LAUNCH_TIMEOUT_MS, 2500, 30000, 6500);
+  let raw;
+  try {
+    raw = await gameStreamHttpsRequest("launch", launchQuery, identity, { timeoutMs });
+  } catch (error) {
+    if (!String(error.message || "").toLowerCase().includes("timeout")) throw error;
+    const serverInfo = await fetchGameStreamServerInfo({ timeoutMs: 1600 }).catch((infoError) => ({
+      error: infoError.message,
+      raw: null,
+      parsed: null,
+    }));
+    if (!isGameStreamBusy(serverInfo)) throw error;
+    const currentGame = serverInfo?.parsed?.currentgame || "1";
+    return {
+      ok: true,
+      raw: null,
+      parsed: {
+        gamesession: currentGame,
+      },
+      sessionUrl: null,
+      inferredFromServerInfo: serverInfo,
+      warning: error.message,
+    };
+  }
   const parsed = parseSimpleXmlFields(raw, [
     "gamesession",
     "sessionUrl0",

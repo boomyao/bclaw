@@ -46,7 +46,8 @@ import com.bclaw.app.ui.theme.BclawTheme
  * Paths:
  *   - **Scan** · [QrScanLauncher] launches the Google Play Services code scanner. Result is
  *     piped straight into the same [BclawV2Intent.PairNewDevice] the paste flow uses.
- *   - **Paste** · Multi-line mono text field + Pair button as a fallback / power-user path.
+ *   - **Paste** · Optional custom name + multi-line mono text field + Pair button as a
+ *     fallback / power-user path.
  *
  * Errors are surfaced two ways:
  *   - URL parse errors → [BclawV2Controller.pairError] stream → inline red helper under the
@@ -63,6 +64,7 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
     val sp = BclawTheme.spacing
 
     val pairError by controller.pairError.collectAsState()
+    var deviceNameInput by remember { mutableStateOf("") }
     var urlInput by remember { mutableStateOf("") }
     var scannerError by remember { mutableStateOf<String?>(null) }
     val qrLauncher = rememberQrScanLauncher()
@@ -150,11 +152,15 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
                         scannerError = null
                         qrLauncher.launch(
                             onResult = { scanned ->
-                                // Push the raw payload into the paste field so the user
-                                // can confirm before committing. Dispatching immediately
-                                // would feel magical but hide garbage-URL bugs.
+                                // Keep the raw payload visible even though the scan path
+                                // commits immediately; parse errors still surface below.
                                 urlInput = scanned
-                                controller.onIntent(BclawV2Intent.PairNewDevice(scanned))
+                                controller.onIntent(
+                                    BclawV2Intent.PairNewDevice(
+                                        rawUrl = scanned,
+                                        displayName = deviceNameInput,
+                                    ),
+                                )
                             },
                             onCancelled = { /* user backed out — no-op */ },
                             onError = { throwable ->
@@ -224,6 +230,19 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
         Spacer(Modifier.height(sp.sp5))
 
         MetroTextField(
+            value = deviceNameInput,
+            onValueChange = { deviceNameInput = it },
+            label = "device name",
+            placeholder = "optional, e.g. Studio Mac",
+            helpMessage = "leave blank to use the host name",
+            singleLine = true,
+            imeAction = ImeAction.Next,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(sp.sp4))
+
+        MetroTextField(
             value = urlInput,
             onValueChange = { urlInput = it },
             label = "bclaw2 url",
@@ -241,7 +260,12 @@ fun PairScreen(onDismiss: (() -> Unit)? = null) {
         MetroButton(
             label = "Pair",
             onClick = {
-                controller.onIntent(BclawV2Intent.PairNewDevice(urlInput))
+                controller.onIntent(
+                    BclawV2Intent.PairNewDevice(
+                        rawUrl = urlInput,
+                        displayName = deviceNameInput,
+                    ),
+                )
             },
             variant = MetroButtonVariant.Accent,
             size = MetroButtonSize.Lg,

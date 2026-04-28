@@ -64,6 +64,20 @@ class DeviceBookRepository(context: Context) {
         }
     }
 
+    suspend fun renameDevice(deviceId: DeviceId, displayName: String) = withContext(Dispatchers.IO) {
+        appContext.deviceBookDataStore.edit { prefs ->
+            val stored = readStoredBook(prefs[bookKey])
+            val current = rehydrateTokens(stored.book)
+            if (current.devices.none { it.id == deviceId }) return@edit
+            val updated = current.copy(
+                devices = current.devices.map { device ->
+                    if (device.id == deviceId) device.copy(displayName = displayName) else device
+                },
+            )
+            writeStoredBook(prefs, normalize(updated), stored.revision + 1)
+        }
+    }
+
     suspend fun setActiveDevice(deviceId: DeviceId?) = withContext(Dispatchers.IO) {
         appContext.deviceBookDataStore.edit { prefs ->
             val stored = readStoredBook(prefs[bookKey])
