@@ -395,7 +395,7 @@ async function updateSunshineConfig(patch) {
 }
 
 function parseSunshineDisplayLogText(raw) {
-  const displayRegex = /Detected display:\s+(.+?)\s+\(id:\s*([^)]+)\)\s+connected:\s+(true|false)/i;
+  const displayRegex = /Detected display:\s+(.+?)\s+\(id:\s*([^)]+)\)(?:\S+\s+)?connected:\s+(true|false)/i;
   const selectedRegex = /Configuring selected display\s+\(([^)]+)\)\s+to stream/i;
   let currentDisplays = [];
   let currentSelectedId = null;
