@@ -18,6 +18,7 @@ INSTALL_SUNSHINE="${BCLAW_INSTALL_SUNSHINE:-1}"
 INSTALL_NODESOURCE="${BCLAW_INSTALL_NODESOURCE:-1}"
 ENABLE_LINGER="${BCLAW_ENABLE_LINGER:-0}"
 SUNSHINE_DEB_URL="${BCLAW_SUNSHINE_DEB_URL:-}"
+OS_RELEASE_FILE="${BCLAW_OS_RELEASE_FILE:-/etc/os-release}"
 SUNSHINE_API_URL="${BCLAW_SUNSHINE_API_URL:-}"
 SUNSHINE_AUTH="${BCLAW_SUNSHINE_AUTH:-}"
 SUNSHINE_USER="${BCLAW_SUNSHINE_USER:-}"
@@ -200,9 +201,9 @@ sunshine_deb_url() {
     return 0
   fi
 
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  local arch
+  # shellcheck disable=SC1090
+  . "$OS_RELEASE_FILE"
+  local arch package_version
   arch="$(dpkg --print-architecture)"
 
   if [ "${ID:-}" != "ubuntu" ]; then
@@ -210,12 +211,17 @@ sunshine_deb_url() {
   fi
   case "${VERSION_ID:-}" in
     22.04|24.04)
-      printf 'https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-%s-%s.deb\n' "$VERSION_ID" "$arch"
+      package_version="$VERSION_ID"
+      ;;
+    24.10)
+      package_version="24.04"
+      warn "Sunshine does not publish an Ubuntu 24.10 package; using the Ubuntu 24.04 package"
       ;;
     *)
-      fail "automatic Sunshine install supports Ubuntu 22.04/24.04; set BCLAW_SUNSHINE_DEB_URL for ${VERSION_ID:-unknown}"
+      fail "automatic Sunshine install supports Ubuntu 22.04/24.04/24.10; set BCLAW_SUNSHINE_DEB_URL for ${VERSION_ID:-unknown}"
       ;;
   esac
+  printf 'https://github.com/LizardByte/Sunshine/releases/latest/download/sunshine-ubuntu-%s-%s.deb\n' "$package_version" "$arch"
 }
 
 ensure_sunshine() {

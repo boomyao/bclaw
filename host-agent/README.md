@@ -94,7 +94,7 @@ scripts/install-ubuntu-host-agent
 
 - 安装 apt 基础依赖（`curl`、`openssl`、`build-essential` 等）。
 - 安装 Node.js 18+；如果 apt 自带版本过旧，默认使用 NodeSource 安装 Node.js 20。
-- 安装 Sunshine（默认从 LizardByte GitHub latest release 下载 Ubuntu 22.04/24.04 `.deb`）。
+- 安装 Sunshine（默认从 LizardByte GitHub latest release 下载 Ubuntu 22.04/24.04 `.deb`；Ubuntu 24.10 会复用 24.04 包）。
 - 生成 `~/.bclaw/host-agent.token`（如果还不存在；旧 `~/.bclaw/ws.token` 会自动迁移）。
 - 注册并启动用户级 systemd 服务 `dev.bclaw.host-agent`。
 - 启动一次 Sunshine。
