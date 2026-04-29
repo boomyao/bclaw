@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-04-29T02:35:00Z",
+  "build": {
+    "success": false,
+    "reason": "bclaw-host fork is not writable from this Codex sandbox; touch /Users/boomyao/projects/bclaw-host-fork/.codex-write-test returned Operation not permitted",
+    "script": "scripts/build-bclaw-host"
+  },
+  "otool": {
+    "systemFrameworks": [],
+    "captured": false,
+    "reason": "dist/bclaw.app was not built"
+  },
+  "codesign": {
+    "output": null,
+    "captured": false,
+    "reason": "dist/bclaw.app was not built"
+  },
+  "trueSocketSmoke": {
+    "attempted": false,
+    "required": true,
+    "pairHandshake": null,
+    "rtspSetup": null,
+    "reason": "blocked before build because the required fork path is read-only to this process"
+  }
+}

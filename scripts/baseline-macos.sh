@@ -135,6 +135,8 @@ def classify(cmd):
     base = os.path.basename(argv0)
     if base in ("Sunshine", "sunshine"):
         return "sunshine"
+    if base == "bclaw-host" or base.endswith("bclaw-host"):
+        return "bclaw-host"
     if base in ("macos-input-helper", "macos_input_helper"):
         return "macos-input-helper"
     if base == "node" and len(parts) >= 2:
@@ -180,6 +182,8 @@ def classify(cmd):
     base = os.path.basename(argv0)
     if base in ("Sunshine", "sunshine"):
         return "sunshine"
+    if base == "bclaw-host" or base.endswith("bclaw-host"):
+        return "bclaw-host"
     if base in ("macos-input-helper", "macos_input_helper"):
         return "macos-input-helper"
     if base == "node" and len(parts) >= 2:

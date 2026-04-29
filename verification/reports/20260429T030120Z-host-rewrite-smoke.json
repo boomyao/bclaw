@@ -1,0 +1,58 @@
+{
+  "timestamp": "20260429T030120Z",
+  "build": {
+    "success": true,
+    "app": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app",
+    "executable": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app/Contents/MacOS/bclaw-host",
+    "executableSizeBytes": 4881424,
+    "otool": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app/Contents/MacOS/bclaw-host:\n\t/usr/lib/libcurl.4.dylib (compatibility version 7.0.0, current version 9.0.0)\n\t/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 45.0.0, current version 2685.50.120)\n\t/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices (compatibility version 1.0.0, current version 66.0.0)\n\t/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)\n\t/System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation (compatibility version 1.0.0, current version 2.0.0)\n\t/System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 3305.24.5)\n\t/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 734.4.0)\n\t/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 4424.1.255)\n\t/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 3305.24.5)\n\t/opt/homebrew/opt/miniupnpc/lib/libminiupnpc.21.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_locale.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_log.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_program_options.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/opt/homebrew/opt/ffmpeg/lib/libswscale.9.dylib (compatibility version 9.0.0, current version 9.1.100)\n\t/opt/homebrew/opt/ffmpeg/lib/libavformat.62.dylib (compatibility version 62.0.0, current version 62.3.100)\n\t/opt/homebrew/opt/ffmpeg/lib/libavcodec.62.dylib (compatibility version 62.0.0, current version 62.11.100)\n\t/opt/homebrew/opt/ffmpeg/lib/libswresample.6.dylib (compatibility version 6.0.0, current version 6.1.100)\n\t/opt/homebrew/opt/ffmpeg/lib/libavutil.60.dylib (compatibility version 60.0.0, current version 60.8.100)\n\t/opt/homebrew/opt/boost/lib/libboost_charconv.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_filesystem.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_thread.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_atomic.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_chrono.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_date_time.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_regex.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/opt/homebrew/opt/boost/lib/libboost_container.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n\t/System/Library/Frameworks/AVFAudio.framework/Versions/A/AVFAudio (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 4424.1.255)\n\t/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (compatibility version 64.0.0, current version 1965.4.5)\n\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)\n",
+    "codesign": "Executable=/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app/Contents/MacOS/bclaw-host\nIdentifier=dev.bclaw.host\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=9839 flags=0x10002(adhoc,runtime) hashes=297+7 location=embedded\nVersionPlatform=1\nVersionMin=1703936\nVersionSDK=1704960\nHash type=sha256 size=32\nCandidateCDHash sha256=4e1e5b809fa805c5f8b6f76036c0c913afb2477a\nCandidateCDHashFull sha256=4e1e5b809fa805c5f8b6f76036c0c913afb2477a4904223b30ced8a690e96c07\nHash choices=sha256\nCMSDigest=4e1e5b809fa805c5f8b6f76036c0c913afb2477a4904223b30ced8a690e96c07\nCMSDigestType=2\nExecutable Segment base=0\nExecutable Segment limit=2801664\nExecutable Segment flags=0x1\nPage size=16384\nCDHash=4e1e5b809fa805c5f8b6f76036c0c913afb2477a\nSignature=adhoc\nInfo.plist entries=14\nTeamIdentifier=not set\nRuntime Version=26.4.0\nSealed Resources version=2 rules=13 files=5\nInternal requirements count=0 size=12\n",
+    "singleExecutableInContentsMacOS": true
+  },
+  "smoke": {
+    "success": false,
+    "error": "bclaw-host did not expose nvhttp in time",
+    "wireEvidencePath": "/Users/boomyao/projects/bclaw-rewrite-codex/.delegate/20260429T030120Z-host-rewrite-wire.json",
+    "ports": {
+      "gameStreamHttp": 57994,
+      "gameStreamHttps": 57989,
+      "rtsp": 58015,
+      "bclawHttp": 18766
+    },
+    "blocked": true,
+    "blocker": "Codex sandbox denies TCP listen with EPERM for loopback ports; verified separately with node net.createServer on 127.0.0.1:3000 returning EPERM.",
+    "pair": {
+      "success": false,
+      "clientType": "node-self-loop-token-pair",
+      "steps": [
+        "getservercert",
+        "clientchallenge",
+        "serverchallengeresp",
+        "clientpairingsecret"
+      ],
+      "blockedBeforeHandshake": true
+    },
+    "rtsp": {
+      "success": false,
+      "methods": [
+        "OPTIONS",
+        "DESCRIBE",
+        "SETUP"
+      ],
+      "blockedBeforeSetup": true
+    },
+    "hostLogs": {
+      "stdoutPath": "20260429T030120Z-bclaw-host.stdout.log",
+      "stderrPath": "20260429T030120Z-bclaw-host.stderr.log"
+    }
+  },
+  "environmentProbe": {
+    "tcpListenProbe": "node net.createServer().listen(3000, \"127.0.0.1\") => EPERM"
+  },
+  "knownGaps": [
+    "Hard acceptance socket smoke could not run in this sandbox because TCP listen is denied by the environment.",
+    "Executable is 4.88 MB because this build links Homebrew FFmpeg/Boost/OpenSSL dynamically; otool lists those dylibs.",
+    "BCLAW_MACOS_ONLY stubs private FFmpeg CBS/NVENC paths for macOS-only compile; full live video frame validation remains open.",
+    "/remote/input/ai/text returns 501 because paid/remote AI execution is intentionally not invoked."
+  ]
+}

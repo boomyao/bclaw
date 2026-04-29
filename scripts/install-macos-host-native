@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+APP_SOURCE="${BCLAW_HOST_APP:-${REPO_DIR}/dist/bclaw.app}"
+INSTALL_SCOPE="${BCLAW_HOST_INSTALL_SCOPE:-user}"
+TOKEN_FILE="${BCLAW_TOKEN_FILE:-${HOME}/.bclaw/host-agent.token}"
+LABEL="dev.bclaw.host-agent"
+PLIST_DIR="${HOME}/Library/LaunchAgents"
+PLIST_PATH="${PLIST_DIR}/${LABEL}.plist"
+
+log() { printf '[install-macos-host-native] %s\n' "$*" >&2; }
+die() { printf '[install-macos-host-native] error: %s\n' "$*" >&2; exit 1; }
+
+[ "$(uname -s)" = "Darwin" ] || die "macOS only"
+
+if [ ! -d "$APP_SOURCE" ]; then
+  log "dist app not found; building first"
+  "${SCRIPT_DIR}/build-bclaw-host"
+fi
+
+[ -x "$APP_SOURCE/Contents/MacOS/bclaw-host" ] || die "missing bclaw-host executable in $APP_SOURCE"
+
+if [ "$INSTALL_SCOPE" = "system" ]; then
+  DEST="/Applications/bclaw.app"
+else
+  mkdir -p "${HOME}/Applications"
+  DEST="${HOME}/Applications/bclaw.app"
+fi
+
+mkdir -p "$(dirname "$TOKEN_FILE")"
+if [ ! -s "$TOKEN_FILE" ]; then
+  umask 077
+  /usr/bin/openssl rand -hex 32 > "$TOKEN_FILE"
+  log "initialized token at $TOKEN_FILE"
+fi
+
+log "installing app to $DEST"
+rm -rf "$DEST"
+cp -R "$APP_SOURCE" "$DEST"
+/usr/bin/xattr -rc "$DEST" 2>/dev/null || true
+
+mkdir -p "$PLIST_DIR"
+cat > "$PLIST_PATH" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${DEST}/Contents/MacOS/bclaw-host</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>BCLAW_TOKEN_FILE</key>
+    <string>${TOKEN_FILE}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${HOME}/Library/Logs/bclaw-host.log</string>
+  <key>StandardErrorPath</key>
+  <string>${HOME}/Library/Logs/bclaw-host.err.log</string>
+</dict>
+</plist>
+PLIST
+
+chmod 600 "$PLIST_PATH"
+
+if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
+  launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
+fi
+launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+launchctl enable "gui/$(id -u)/${LABEL}"
+
+log "installed runtime without requiring Homebrew, Node, or Sunshine"
+log "launchd label: ${LABEL}"

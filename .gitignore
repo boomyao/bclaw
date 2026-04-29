@@ -1,5 +1,6 @@
 # Claude/Codex delegation workspace — never commit
 .delegate/
+.bclaw-host-fork/
 
 # Claude Code local state
 .claude/settings.local.json

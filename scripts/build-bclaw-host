@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FORK_DIR="${BCLAW_HOST_FORK:-${REPO_DIR}/.bclaw-host-fork}"
+BUILD_DIR="${BCLAW_HOST_BUILD_DIR:-${REPO_DIR}/.delegate/bclaw-host-build}"
+DIST_DIR="${REPO_DIR}/dist"
+APP_OUT="${DIST_DIR}/bclaw.app"
+ENTITLEMENTS="${BUILD_DIR}/bclaw-host.entitlements"
+
+log() { printf '[build-bclaw-host] %s\n' "$*" >&2; }
+die() { printf '[build-bclaw-host] error: %s\n' "$*" >&2; exit "${2:-1}"; }
+
+[ "$(uname -s)" = "Darwin" ] || die "macOS only"
+[ -d "$FORK_DIR" ] || die "Sunshine fork not found: $FORK_DIR"
+
+if ! (cd "$FORK_DIR" && touch .bclaw-write-check && rm .bclaw-write-check) 2>/dev/null; then
+  die "fork is not writable by this process: $FORK_DIR" 66
+fi
+
+if command -v brew >/dev/null 2>&1; then
+  log "build-time dependency manager: $(command -v brew)"
+  log "runtime dependency policy: no Homebrew requirement in dist/bclaw.app"
+else
+  log "brew is not installed; continuing if cmake/pkg-config/dependencies are already available"
+fi
+
+for tool in cmake pkg-config codesign otool; do
+  command -v "$tool" >/dev/null 2>&1 || die "required build tool not found: $tool"
+done
+
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR" "$DIST_DIR"
+
+cat > "$ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
+PLIST
+
+log "configuring CMake in $BUILD_DIR"
+cmake -S "$FORK_DIR" -B "$BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_DOCS=OFF \
+  -DBUILD_TESTS=OFF \
+  -DSUNSHINE_ENABLE_TRAY=OFF \
+  -DSUNSHINE_ENABLE_WEB_UI=OFF \
+  -DSUNSHINE_BUILD_HOMEBREW=OFF \
+  -DCMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES:-arm64}"
+
+log "building bclaw-host"
+cmake --build "$BUILD_DIR" --config Release --parallel
+
+APP_CANDIDATE=""
+while IFS= read -r candidate; do
+  if [ -x "$candidate/Contents/MacOS/bclaw-host" ]; then
+    APP_CANDIDATE="$candidate"
+    break
+  fi
+done < <(find "$BUILD_DIR" -maxdepth 3 -name '*.app' -type d | sort)
+
+[ -n "$APP_CANDIDATE" ] || die "built .app with Contents/MacOS/bclaw-host was not found"
+
+rm -rf "$APP_OUT"
+cp -R "$APP_CANDIDATE" "$APP_OUT"
+/usr/bin/xattr -rc "$APP_OUT" 2>/dev/null || true
+
+EXEC_COUNT="$(find "$APP_OUT/Contents/MacOS" -type f -perm +111 | wc -l | tr -d ' ')"
+[ "$EXEC_COUNT" = "1" ] || die "expected exactly one executable in Contents/MacOS, found $EXEC_COUNT"
+
+log "adhoc signing hardened runtime"
+/usr/bin/codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_OUT"
+/usr/bin/codesign --verify --strict --verbose=2 "$APP_OUT"
+
+log "wrote $APP_OUT"
+otool -L "$APP_OUT/Contents/MacOS/bclaw-host"
+codesign -dv --verbose=4 "$APP_OUT" 2>&1 || true

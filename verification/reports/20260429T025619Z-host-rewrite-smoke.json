@@ -1,0 +1,19 @@
+{
+  "timestamp": "20260429T025619Z",
+  "build": {
+    "success": true,
+    "app": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app",
+    "executable": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app/Contents/MacOS/bclaw-host"
+  },
+  "smoke": {
+    "success": false,
+    "error": "bclaw-host did not expose nvhttp in time",
+    "wireEvidencePath": "/Users/boomyao/projects/bclaw-rewrite-codex/.delegate/20260429T025619Z-host-rewrite-wire.json",
+    "ports": {
+      "gameStreamHttp": 57994,
+      "gameStreamHttps": 57989,
+      "rtsp": 58015,
+      "bclawHttp": 18766
+    }
+  }
+}
