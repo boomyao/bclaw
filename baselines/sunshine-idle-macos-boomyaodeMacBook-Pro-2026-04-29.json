@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "capturedAtUTC": "2026-04-29T01:46:54Z",
+  "target": "sunshine",
+  "mode": "idle",
+  "git": {
+    "branch": "macos-host-rewrite",
+    "sha": "1cee48c"
+  },
+  "system": {
+    "productVersion": "26.3.1",
+    "buildVersion": "25D2128",
+    "model": "MacBookPro18,2",
+    "arch": "arm64",
+    "chip": "Apple M1 Max",
+    "cores": 10,
+    "ramBytes": 34359738368
+  },
+  "dependencies": {
+    "sunshinePath": "/opt/homebrew/bin/sunshine",
+    "sunshineVersion": "0.0.0-dirty",
+    "nodePath": "/Users/boomyao/.nvm/versions/node/v25.8.0/bin/node",
+    "nodeVersion": "v25.8.0",
+    "brewPath": "/opt/homebrew/bin/brew",
+    "inputHelper": ""
+  },
+  "processes": [
+    {
+      "pid": 6549,
+      "rssKb": 1696,
+      "cpuPct": 0.0,
+      "bucket": "sunshine-helper",
+      "command": "/bin/zsh /Users/boomyao/.config/sunshine/keep-display-awake.sh"
+    },
+    {
+      "pid": 54364,
+      "rssKb": 69008,
+      "cpuPct": 0.0,
+      "bucket": "sunshine",
+      "command": "/Applications/Sunshine.app/Contents/MacOS/Sunshine"
+    },
+    {
+      "pid": 88056,
+      "rssKb": 40832,
+      "cpuPct": 0.0,
+      "bucket": "host-agent",
+      "command": "node server.js"
+    }
+  ],
+  "tccPermissions": {
+    "readable": false,
+    "reason": "TCC.db not readable; grant Full Disk Access to this terminal",
+    "entries": []
+  },
+  "installFootprint": {
+    "brewInstallCalls": 2,
+    "brewTapCalls": 1,
+    "npmInstallCalls": 2,
+    "homebrewBootstrap": 1,
+    "sunshineFormula": 56
+  },
+  "load": {
+    "durationS": 60,
+    "sampleCount": 57,
+    "perProcess": {
+      "sunshine-helper": {
+        "cpuPctP50": 0.0,
+        "cpuPctP95": 0.1,
+        "rssKbP50": 1696,
+        "rssKbP95": 1696,
+        "samples": 57
+      },
+      "sunshine": {
+        "cpuPctP50": 0.0,
+        "cpuPctP95": 0.0,
+        "rssKbP50": 65856,
+        "rssKbP95": 69008,
+        "samples": 57
+      },
+      "host-agent": {
+        "cpuPctP50": 0.0,
+        "cpuPctP95": 0.0,
+        "rssKbP50": 40784,
+        "rssKbP95": 40832,
+        "samples": 57
+      }
+    }
+  },
+  "deferred": {
+    "latency": "blocked on Milestone 0 (headless Moonlight test client)",
+    "vmaf": "blocked on Milestone 0"
+  }
+}
