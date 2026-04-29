@@ -1,0 +1,25 @@
+{
+  "timestamp": "20260429T035555Z",
+  "build": {
+    "success": true,
+    "app": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app",
+    "executable": "/Users/boomyao/projects/bclaw-rewrite-codex/dist/bclaw.app/Contents/MacOS/bclaw-host"
+  },
+  "smoke": {
+    "success": false,
+    "error": "bclaw-host exited before control HTTP was ready: code=0 signal=null",
+    "bindFailure": "RTSP bind on 127.0.0.1:58015 failed with Operation not permitted",
+    "sandboxProbe": "Standalone Node listen(127.0.0.1:3000) also returned EPERM in this Codex sandbox",
+    "wireEvidencePath": "/Users/boomyao/projects/bclaw-rewrite-codex/.delegate/20260429T035555Z-session-start-wire.json",
+    "ports": {
+      "gameStreamHttp": 57994,
+      "gameStreamHttps": 57989,
+      "rtsp": 58015,
+      "bclawHttp": 18766
+    },
+    "hostLogs": {
+      "stdoutPath": "/Users/boomyao/projects/bclaw-rewrite-codex/.delegate/20260429T035555Z-session-start-host.stdout.log",
+      "stderrPath": "/Users/boomyao/projects/bclaw-rewrite-codex/.delegate/20260429T035555Z-session-start-host.stderr.log"
+    }
+  }
+}

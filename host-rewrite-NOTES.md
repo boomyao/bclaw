@@ -1,6 +1,17 @@
 # bclaw-host Fork-Strip Notes
 
-Status: fork modified and `dist/bclaw.app` built/signed, but final true TCP smoke is blocked by the Codex sandbox. The sandbox returns `EPERM` for loopback TCP listeners, verified independently with `node net.createServer().listen(3000, "127.0.0.1")`; `bclaw-host` likewise fails binding RTSP before the pair client can connect. Latest report: `verification/reports/20260429T030120Z-host-rewrite-smoke.json`.
+Status: **landed on 2026-04-29** — real Android client paired and streamed end-to-end via `bclaw-host` on standard Moonlight ports (47984/47989/47990/48010 + 8766 bclaw control). Old Sunshine + Node host-agent stack is no longer needed for the macOS host (kept on disk as rollback channel; see "Cutover plan" below). Latest passing protocol smokes: `verification/reports/20260429T031012Z-host-rewrite-smoke.json` (pair + RTSP via `.delegate/host_rewrite_smoke.js`).
+
+Post-landing fixes applied as fork commits on top of the initial fork-strip:
+- `54718055` catalog/status JSON shape: added `installed/stream/display/wake/pairStatus="1"` for Android client compat.
+- `495a796a` session/start: real `nvhttp::launch_game_stream_app` call returning `riKey`/`riKeyId`/`sessionUrl0`.
+- `feef3ee4` session/start: appid is a string, fix nlohmann type_error.302.
+
+## Cutover plan (not yet executed)
+
+- Old Node host-agent at `host-agent/` and installer `scripts/install-macos-host-agent` retained for rollback.
+- `scripts/install-macos-host-native` is the new launchd-based install (uses bclaw-host directly, no brew/node/sunshine at runtime).
+- Recommended sweep: after 1–2 weeks of dog-fooding, retire `host-agent/` and `install-macos-host-agent`; rerun §4 perf comparison vs `baselines/sunshine-{idle,streaming}-macos-*.json`.
 
 ## Retained Sunshine Modules
 
@@ -106,3 +117,12 @@ The build script writes and signs with:
 2. Bundle or relink Homebrew dylibs into `Contents/Frameworks` and rewrite install names for runtime independence.
 3. Replace FFmpeg CBS stubs with a macOS-compatible static/prepared FFmpeg dependency if live frame SPS rewriting is required.
 4. Re-enable platform initialization and run full stream smoke once Screen Recording permission is granted to the signed app/binary.
+
+## Session Start Endpoint Round
+
+- Replaced the native `/v1/sunshine/session/start` stub with launch-plan construction in `src/bclaw_http.mm`: optional JSON body parsing, app selection, display field propagation, 16-byte uppercase `riKey`, random `riKeyId`, old host-agent-style `stream`, `display`, and `gameStream` response fields.
+- Added nvhttp internal helpers in `src/nvhttp.cpp`/`src/nvhttp.h` so the control endpoint can create the same GameStream launch session as `/launch`, raise RTSP session state, and return parsed launch XML including `gamesession` and `sessionUrl0`.
+- Added an RTSP pending-launch clear helper so repeated `/session/start` calls cannot leave RTSP armed with an older `riKey` while returning a fresh one to Android.
+- Added `.delegate/session_start_smoke.js`, which starts an isolated host, POSTs `/v1/sunshine/session/start`, checks `riKey`/`riKeyId`/`sessionUrl0`/`gamesession`, then attempts RTSP `OPTIONS`, `DESCRIBE`, `SETUP audio`, `SETUP video`, `SETUP control`, and `PLAY`.
+- Rebuilt `dist/bclaw.app` successfully with `scripts/build-bclaw-host`; fork commit: `495a796a bclaw session start launches gamestream`.
+- Verification is currently blocked by this Codex sandbox denying TCP listeners: both the new smoke and existing `.delegate/host_rewrite_smoke.js` fail at host startup with RTSP `bind(...): Operation not permitted`, and a standalone Node `listen(127.0.0.1:3000)` also returns `EPERM`. Latest session-start report: `verification/reports/20260429T035555Z-session-start-smoke.json`.
